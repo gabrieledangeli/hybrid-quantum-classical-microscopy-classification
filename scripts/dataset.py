@@ -1,7 +1,7 @@
 import os
 import torch
 import numpy as np
-import tifffile
+import sys
 from torch.utils.data import Dataset
 from PIL import Image
 
@@ -68,20 +68,9 @@ class MedicalDataset(Dataset):
         
         try:
             image = Image.open(img_path).convert('RGB')
-        except Exception:
-            print("Failed to open image with PIL, trying tifffile...")
-            try:
-                img_arr = tifffile.imread(img_path)
-                if img_arr.dtype not in [np.uint8, np.bool_]:
-                    img_arr = img_arr.astype(np.float32)
-                    img_arr = (img_arr - img_arr.min()) / (img_arr.max() - img_arr.min() + 1e-8) * 255.0
-                    img_arr = img_arr.astype(np.uint8)
-                
-                image = Image.fromarray(img_arr).convert('RGB')
-            except Exception as e:
-                print(f"Error loading {img_name}: {e}")
-                # Return black image in case of complete failure
-                image = Image.new('RGB', (256, 256))
+        except Exception as e:
+            print(f"Error loading {img_name}: {e}")
+            sys.exit(1)
         return image
 
     def __len__(self):
