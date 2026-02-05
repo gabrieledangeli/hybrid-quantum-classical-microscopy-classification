@@ -5,7 +5,9 @@ import torchvision
 import torchvision.transforms as transforms
 import matplotlib.pyplot as plt
 import numpy as np
+import os
 from ResNet18 import ResNet18
+from dataset import MedicalDataset, class_to_idx
 
 if __name__ == '__main__':
     # Define transforms for 256x256 images
@@ -22,20 +24,27 @@ if __name__ == '__main__':
         transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
     ])
 
-    # Using FakeData to simulate a dataset with 256x256 images
-    # Replace this with:
-    # trainset = torchvision.datasets.ImageFolder(root='./data/train', transform=transform_train)
-    # testset = torchvision.datasets.ImageFolder(root='./data/val', transform=transform_test)
+    # Load dataset from data/microscopy/images/rgb_scale100
+    # Use absolute paths or paths relative to the script location to avoid CWD issues
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    workspace_dir = os.path.dirname(script_dir)
     
-    num_classes = 2 # Example for medical binary classification
+    data_path = os.path.join(workspace_dir, 'data', 'microscopy', 'images', 'rgb_scale100')
+    annotation_path = os.path.join(workspace_dir, 'data', 'microscopy', 'labels', 'Ma190c_annotations.dat')
     
-    trainset = torchvision.datasets.FakeData(size=1000, image_size=(3, 256, 256), num_classes=num_classes, transform=transform_train)
+    full_dataset = MedicalDataset(root_dir=data_path, annotation_file=annotation_path, transform=transform_train, preload=True)
+    num_classes = len(class_to_idx)
+    
+    print(f"Dataset loaded from {data_path} with {len(full_dataset)} images.")
+
+    # Split dataset into train and test
+    train_size = int(0.8 * len(full_dataset))
+    test_size = len(full_dataset) - train_size
+    trainset, testset = torch.utils.data.random_split(full_dataset, [train_size, test_size])
+    
     trainloader = torch.utils.data.DataLoader(trainset, batch_size=32, shuffle=True, num_workers=2)
-
-    testset = torchvision.datasets.FakeData(size=200, image_size=(3, 256, 256), num_classes=num_classes, transform=transform_test)
     testloader = torch.utils.data.DataLoader(testset, batch_size=32, shuffle=False, num_workers=2)
-
-    classes = ('class0', 'class1')
+    print(f"Training set: {len(trainset)} images, Test set: {len(testset)} images.")
 
     # Instantiate the model, define the loss function and the optimizer
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -45,8 +54,27 @@ if __name__ == '__main__':
     scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=30, gamma=0.1)
 
     # Training loop
-    num_epochs = 10
+    num_epochs = 100
     train_losses, train_acc_list, test_acc_list = [], [], []
+
+    print("\n" + "="*50)
+    print(f"{'TRAINING CONFIGURATION':^50}")
+    print("="*50)
+    print(f"{'Device':<20}: {device}")
+    print(f"{'Model Architecture':<20}: ResNet18")
+    print(f"{'Combined Classes':<20}: {num_classes}")
+    print("-" * 50)
+    print(f"{'Epochs':<20}: {num_epochs}")
+    print(f"{'Batch Size':<20}: 32")
+    print(f"{'Learning Rate':<20}: 0.01")
+    print(f"{'Optimizer':<20}: SGD (mom=0.9, wd=5e-4)")
+    print(f"{'Scheduler':<20}: StepLR (step=30, gamma=0.1)")
+    print("-" * 50)
+    print(f"{'Total Dataset':<20}: {len(full_dataset)}")
+    print(f"{'Training Set':<20}: {train_size} ({train_size/len(full_dataset):.0%})")
+    print(f"{'Test Set':<20}: {test_size} ({test_size/len(full_dataset):.0%})")
+    print(f"{'Preloading':<20}: {full_dataset.preload}")
+    print("="*50 + "\n")
 
     print("="*20)
     print("Starting Training...")
