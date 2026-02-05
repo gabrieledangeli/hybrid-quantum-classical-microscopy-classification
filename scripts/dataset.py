@@ -1,7 +1,7 @@
 import os
 import torch
 import numpy as np
-import sys
+import tifffile
 from torch.utils.data import Dataset
 from PIL import Image
 
@@ -38,10 +38,11 @@ def load_annotations(annotation_file):
     return annotations
 
 class MedicalDataset(Dataset):
-    def __init__(self, root_dir, annotation_file, transform=None, preload=True):
+    def __init__(self, root_dir, annotation_file, transform=None, preload=True, mode='RGB'):
         self.root_dir = root_dir
         self.transform = transform
         self.preload = preload
+        self.mode = mode
         self.image_files = [f for f in os.listdir(root_dir) if f.lower().endswith(('.png', '.jpg', '.jpeg', '.tiff', '.bmp'))]
         self.annotations = load_annotations(annotation_file)
         
@@ -67,10 +68,29 @@ class MedicalDataset(Dataset):
         img_path = os.path.join(self.root_dir, img_name)
         
         try:
-            image = Image.open(img_path).convert('RGB')
-        except Exception as e:
-            print(f"Error loading {img_name}: {e}")
-            sys.exit(1)
+            # Try to open with PIL
+            image = Image.open(img_path).convert(self.mode)
+        except Exception:
+            # If it fail, use tifffile
+            try:
+                img_arr = tifffile.imread(img_path)
+
+                # Robust normalization using percentiles to ignore outliers (hot pixels)
+                if img_arr.dtype not in [np.uint8, np.bool_]:
+                    img_arr = img_arr.astype(np.float32)
+                    p_low, p_high = np.percentile(img_arr, (1, 99))
+                    img_arr = np.clip(img_arr, p_low, p_high)
+                    img_arr = (img_arr - p_low) / (p_high - p_low + 1e-8) * 255.0
+                    img_arr = img_arr.astype(np.uint8)
+                
+                image = Image.fromarray(img_arr).convert(self.mode)
+            except Exception as e:
+                print(f"Error loading {img_name}: {e}")
+                # Return black image in case of total failure
+                if self.mode == 'RGB':
+                    image = Image.new('RGB', (256, 256))
+                else: 
+                    image = Image.new('L', (256, 256))
         return image
 
     def __len__(self):

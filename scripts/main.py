@@ -9,31 +9,55 @@ import os
 from tqdm import tqdm
 from ResNet18 import ResNet18
 from dataset import MedicalDataset, class_to_idx
+from args import get_args
 
 if __name__ == '__main__':
+    # Get arguments
+    args = get_args()
+
+    # Load dataset paths first to determine channels
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    workspace_dir = os.path.dirname(script_dir)
+    
+    # Select dataset based on args
+    if args.mode == 'rgb':
+        data_path = os.path.join(workspace_dir, 'data', 'microscopy', 'images', 'rgb_scale100')
+    else:
+        data_path = os.path.join(workspace_dir, 'data', 'microscopy', 'images', 'raw_scale100')
+
+    annotation_path = os.path.join(workspace_dir, 'data', 'microscopy', 'labels', 'Ma190c_annotations.dat')
+    
+    # Determine mode based on folder name/args
+    if args.mode == 'rgb':
+        input_mode = 'RGB'
+        in_channels = 3
+        norm_mean = (0.5, 0.5, 0.5)
+        norm_std = (0.5, 0.5, 0.5)
+    else:
+        input_mode = 'L' # Grayscale
+        in_channels = 1
+        norm_mean = (0.5,)
+        norm_std = (0.5,)
+    
+    print(f"Detected mode: {input_mode} ({in_channels} channels)")
+
     # Define transforms for 256x256 images
     transform_train = transforms.Compose([
         transforms.Resize((256, 256)),
         transforms.RandomHorizontalFlip(),
+        transforms.RandomVerticalFlip(),
+        transforms.RandomRotation(90),
         transforms.ToTensor(),
-        transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+        transforms.Normalize(norm_mean, norm_std),
     ])
 
     transform_test = transforms.Compose([
         transforms.Resize((256, 256)),
         transforms.ToTensor(),
-        transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+        transforms.Normalize(norm_mean, norm_std),
     ])
 
-    # Load dataset from data/microscopy/images/rgb_scale100
-    # Use absolute paths or paths relative to the script location to avoid CWD issues
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    workspace_dir = os.path.dirname(script_dir)
-    
-    data_path = os.path.join(workspace_dir, 'data', 'microscopy', 'images', 'rgb_scale100')
-    annotation_path = os.path.join(workspace_dir, 'data', 'microscopy', 'labels', 'Ma190c_annotations.dat')
-    
-    full_dataset = MedicalDataset(root_dir=data_path, annotation_file=annotation_path, transform=transform_train, preload=True)
+    full_dataset = MedicalDataset(root_dir=data_path, annotation_file=annotation_path, transform=transform_train, preload=not args.no_preload, mode=input_mode)
     num_classes = len(class_to_idx)
     
     print(f"Dataset loaded from {data_path} with {len(full_dataset)} images.")
@@ -43,18 +67,20 @@ if __name__ == '__main__':
     test_size = len(full_dataset) - train_size
     trainset, testset = torch.utils.data.random_split(full_dataset, [train_size, test_size])
     
-    trainloader = torch.utils.data.DataLoader(trainset, batch_size=32, shuffle=True, num_workers=2)
-    testloader = torch.utils.data.DataLoader(testset, batch_size=32, shuffle=False, num_workers=2)
+    trainloader = torch.utils.data.DataLoader(trainset, batch_size=args.batch_size, shuffle=True, num_workers=2)
+    testloader = torch.utils.data.DataLoader(testset, batch_size=args.batch_size, shuffle=False, num_workers=2)
 
     # Instantiate the model, define the loss function and the optimizer
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = ResNet18(num_classes=num_classes).to(device)
+    model = ResNet18(num_classes=num_classes, in_channels=in_channels).to(device)
     criterion = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-4)
-    scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=30, gamma=0.1)
+    
+    optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.wd)
+        
+    scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=args.step_size, gamma=args.gamma)
 
     # Training loop
-    num_epochs = 100
+    num_epochs = args.epochs
     train_losses, train_acc_list, test_acc_list = [], [], []
 
     print("\n" + "="*50)
@@ -64,11 +90,12 @@ if __name__ == '__main__':
     print(f"{'Model Architecture':<20}: ResNet18")
     print(f"{'Combined Classes':<20}: {num_classes}")
     print("-" * 50)
+    print(f"{'Mode':<20}: {args.mode}")
     print(f"{'Epochs':<20}: {num_epochs}")
-    print(f"{'Batch Size':<20}: 32")
-    print(f"{'Learning Rate':<20}: 0.001")
-    print(f"{'Optimizer':<20}: Adam (wd=1e-4)")
-    print(f"{'Scheduler':<20}: StepLR (step=30, gamma=0.1)")
+    print(f"{'Batch Size':<20}: {args.batch_size}")
+    print(f"{'Learning Rate':<20}: {args.lr}")
+    print(f"{'Optimizer':<20}: Adam (wd={args.wd})")
+    print(f"{'Scheduler':<20}: StepLR (step={args.step_size}, gamma={args.gamma})")
     print("-" * 50)
     print(f"{'Total Dataset':<20}: {len(full_dataset)}")
     print(f"{'Training Set':<20}: {train_size} ({train_size/len(full_dataset):.0%})")
