@@ -6,6 +6,7 @@ import torchvision.transforms as transforms
 import matplotlib.pyplot as plt
 import numpy as np
 import os
+from tqdm import tqdm
 from ResNet18 import ResNet18
 from dataset import MedicalDataset, class_to_idx
 
@@ -44,13 +45,12 @@ if __name__ == '__main__':
     
     trainloader = torch.utils.data.DataLoader(trainset, batch_size=32, shuffle=True, num_workers=2)
     testloader = torch.utils.data.DataLoader(testset, batch_size=32, shuffle=False, num_workers=2)
-    print(f"Training set: {len(trainset)} images, Test set: {len(testset)} images.")
 
     # Instantiate the model, define the loss function and the optimizer
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = ResNet18(num_classes=num_classes).to(device)
     criterion = nn.CrossEntropyLoss()
-    optimizer = optim.SGD(model.parameters(), lr=0.01, momentum=0.9, weight_decay=5e-4) # Adjusted LR
+    optimizer = optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-4)
     scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=30, gamma=0.1)
 
     # Training loop
@@ -66,8 +66,8 @@ if __name__ == '__main__':
     print("-" * 50)
     print(f"{'Epochs':<20}: {num_epochs}")
     print(f"{'Batch Size':<20}: 32")
-    print(f"{'Learning Rate':<20}: 0.01")
-    print(f"{'Optimizer':<20}: SGD (mom=0.9, wd=5e-4)")
+    print(f"{'Learning Rate':<20}: 0.001")
+    print(f"{'Optimizer':<20}: Adam (wd=1e-4)")
     print(f"{'Scheduler':<20}: StepLR (step=30, gamma=0.1)")
     print("-" * 50)
     print(f"{'Total Dataset':<20}: {len(full_dataset)}")
@@ -80,10 +80,14 @@ if __name__ == '__main__':
     print("Starting Training...")
     print("="*20)
 
-    for epoch in range(num_epochs):
+    # Epoch loop with progress bar
+    epoch_pbar = tqdm(range(num_epochs), desc="Training", unit="epoch")
+    
+    for epoch in epoch_pbar:
         model.train()
         running_loss = 0.0
         correct, total = 0, 0
+        
         for inputs, labels in trainloader:
             inputs, labels = inputs.to(device), labels.to(device)
 
@@ -116,7 +120,13 @@ if __name__ == '__main__':
         test_acc_list.append(test_acc)
 
         scheduler.step()
-        print(f'Epoch [{epoch+1}/{num_epochs}] - Loss: {train_loss:.4f}, Train Acc: {train_acc:.2f}%, Test Acc: {test_acc:.2f}%')
+        
+        # Update progress bar with metrics
+        epoch_pbar.set_postfix({
+            'Loss': f'{train_loss:.4f}', 
+            'Train Acc': f'{train_acc:.2f}%', 
+            'Test Acc': f'{test_acc:.2f}%'
+        })
 
 
     # Plot training loss and accuracy

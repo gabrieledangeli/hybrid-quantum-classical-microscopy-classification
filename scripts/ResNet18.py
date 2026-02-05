@@ -46,6 +46,8 @@ class ResNet18(nn.Module):
         self.layer4 = self._make_layer(BasicBlock, 512, 2, stride=2)
 
         self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
+        # Feature vector size is 512 for ResNet18
+        # TODO: Add Quantum Layer here for HQCNN
         self.fc = nn.Linear(512, num_classes)
 
     def _make_layer(self, block, out_channels, blocks, stride):
