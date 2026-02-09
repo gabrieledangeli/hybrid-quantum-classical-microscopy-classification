@@ -86,13 +86,9 @@ if __name__ == '__main__':
             shots=args.shots, 
             in_channels=in_channels
         ).to(device)
-        print(sum(p.numel() for p in model.parameters()), "total parameters")
-        exit()
     else:
         print("Initializing Classical ResNet18 Model")
         model = ResNet18(num_classes=num_classes, in_channels=in_channels).to(device)
-        print(sum(p.numel() for p in model.parameters()), "total parameters")
-        exit()
 
     criterion = nn.CrossEntropyLoss(weight=None).to(device)
     
