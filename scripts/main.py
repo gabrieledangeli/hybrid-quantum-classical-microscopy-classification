@@ -8,6 +8,7 @@ import numpy as np
 import os
 from tqdm import tqdm
 from ResNet18 import ResNet18
+from HQCNN import HybridResNet18
 from dataset import MedicalDataset, class_to_idx
 from args import get_args
 
@@ -72,8 +73,28 @@ if __name__ == '__main__':
 
     # Instantiate the model, define the loss function and the optimizer
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = ResNet18(num_classes=num_classes, in_channels=in_channels).to(device)
-    criterion = nn.CrossEntropyLoss()
+    
+    if args.use_quantum:
+        print(f"Initializing Hybrid Model (Quantum={args.use_quantum})")
+        model = HybridResNet18(
+            num_classes=num_classes, 
+            n_qubits=args.n_qubits, 
+            n_layers=args.n_layers, 
+            freeze_backbone=args.freeze_backbone, 
+            ansatz=args.ansatz, 
+            backend=args.backend, 
+            shots=args.shots, 
+            in_channels=in_channels
+        ).to(device)
+        print(sum(p.numel() for p in model.parameters()), "total parameters")
+        exit()
+    else:
+        print("Initializing Classical ResNet18 Model")
+        model = ResNet18(num_classes=num_classes, in_channels=in_channels).to(device)
+        print(sum(p.numel() for p in model.parameters()), "total parameters")
+        exit()
+
+    criterion = nn.CrossEntropyLoss(weight=None).to(device)
     
     optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.wd)
         
@@ -87,8 +108,27 @@ if __name__ == '__main__':
     print(f"{'TRAINING CONFIGURATION':^50}")
     print("="*50)
     print(f"{'Device':<20}: {device}")
-    print(f"{'Model Architecture':<20}: ResNet18")
-    print(f"{'Combined Classes':<20}: {num_classes}")
+    
+    if args.use_quantum:
+        model_type = "Hybrid Quantum ResNet18"
+    elif args.freeze_backbone:
+        model_type = "Frozen Classical ResNet18"
+    else:
+        model_type = "Classical ResNet18"
+        
+    print(f"{'Model Architecture':<20}: {model_type}")
+    print(f"{'Output Classes':<20}: {num_classes}")
+    
+    if args.use_quantum:
+        print("-" * 50)
+        print(f"{'>>> QUANTUM CONFIG':<20}")
+        print(f"{'Qubits':<20}: {args.n_qubits}")
+        print(f"{'Layers':<20}: {args.n_layers}")
+        print(f"{'Ansatz':<20}: {args.ansatz}")
+        print(f"{'Backend':<20}: {args.backend}")
+        print(f"{'Shots':<20}: {args.shots if args.shots else 'Analytic (None)'}")
+        print(f"{'Backbone Frozen':<20}: {args.freeze_backbone}")
+
     print("-" * 50)
     print(f"{'Mode':<20}: {args.mode}")
     print(f"{'Epochs':<20}: {num_epochs}")
@@ -174,4 +214,19 @@ if __name__ == '__main__':
     plt.legend()
 
     plt.tight_layout()
+    
+    # Save the plot
+    plots_dir = os.path.join(workspace_dir, 'plots')
+    os.makedirs(plots_dir, exist_ok=True)
+    
+    # Create a unique filename based on config
+    filename = f"training_plot_{model_type.replace(' ', '_')}_{args.mode}_e{args.epochs}"
+    if args.use_quantum:
+        filename += f"_q{args.n_qubits}_l{args.n_layers}"
+    filename += ".png"
+    
+    save_path = os.path.join(plots_dir, filename)
+    plt.savefig(save_path)
+    print(f"Plot saved to: {save_path}")
+    
     plt.show()

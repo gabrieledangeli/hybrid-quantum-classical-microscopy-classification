@@ -7,3 +7,5 @@ logs/
 checkpoints/
 data/
 results/
+pennylane/
+plots/
