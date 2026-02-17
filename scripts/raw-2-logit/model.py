@@ -1,0 +1,212 @@
+import os
+from collections import defaultdict
+from typing import Dict, Any, Optional, List, Tuple
+
+import torch
+import torch.nn as nn
+import torch.optim
+from torchvision.models import resnet18, resnet34, resnet50, ResNet
+import torchvision.utils as vutils
+
+
+def resnet_model(model_name: str = 'resnet18', 
+                 pretrained: bool = True, 
+                 in_channels: int = 3, 
+                 fc_out_features: int = 2) -> ResNet:
+    """
+    Factory function to create a ResNet model with a custom fully connected layer.
+    """
+    model_name_lower = model_name.lower()
+    
+    if model_name_lower == 'resnet18':
+        resnet = resnet18(pretrained=pretrained)
+    elif model_name_lower == 'resnet34':
+        resnet = resnet34(pretrained=pretrained)
+    elif model_name_lower == 'resnet50':
+        resnet = resnet50(pretrained=pretrained)
+    else:
+        raise ValueError(f"Unknown model name: {model_name}")
+
+    # Modify the input layer if channels != 3 (standard ResNet takes 3)
+    if in_channels != 3:
+        # Note: This is a hacky way to change input channels, usually requires more care
+        # but leaving as is if logic relies on standard ResNet stricture
+        # Actually, standard torchvision resnet has .conv1
+        resnet.conv1 = nn.Conv2d(in_channels, 64, kernel_size=7, stride=2, padding=3, bias=False)
+
+    # Modify the final fully connected layer
+    resnet.fc = nn.Linear(
+        in_features=resnet.fc.in_features, 
+        out_features=fc_out_features, 
+        bias=True
+    )
+    
+    return resnet
+
+
+class EndToEndModel(nn.Module):
+    """
+    End-to-End model that combines a raw-processor, augmentation, and a classifier.
+    """
+
+    def __init__(self,
+                 classifier: nn.Module,
+                 processor: Optional[nn.Module] = None,
+                 augmentation: Optional[nn.Module] = None,
+                 is_segmentation_task: bool = False,
+                 augmentation_on_eval: bool = False,
+                 freeze_classifier: bool = False,
+                 freeze_processor: bool = False):
+        super().__init__()
+
+        self.classifier = classifier
+        self.processor = processor
+        self.augmentation = augmentation
+        
+        self.is_segmentation_task = is_segmentation_task
+        self.augmentation_on_eval = augmentation_on_eval
+        
+        self.freeze_classifier = freeze_classifier
+        self.freeze_processor = freeze_processor
+
+        if freeze_classifier:
+            self._freeze_module(self.classifier)
+        
+        if freeze_processor and self.processor is not None:
+             self._freeze_module(self.processor)
+
+    def _freeze_module(self, module: nn.Module) -> None:
+        for param in module.parameters():
+            param.requires_grad = False
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # 1. Image Processing (Raw -> RGB)
+        if self.processor is not None:
+            x = self.processor(x)
+        
+        # 2. Augmentation (Training only, unless specified)
+        apply_augmentation = self.training or self.augmentation_on_eval
+        if self.augmentation is not None and apply_augmentation:
+            # Note: The augmentation module is expected to handle 'retain_state' 
+            # if it's a custom one from augmentation.py
+            if self.is_segmentation_task:
+                 # Assuming custom augmentation supports this arg
+                x = self.augmentation(x, retain_state=True)
+            else:
+                x = self.augmentation(x)
+            
+        # 3. Classification
+        x = self.classifier(x)
+        return x
+
+
+def log_tensor(batch: torch.Tensor, path: str, save_tensors: bool = True, nrow: int = 8) -> None:
+    """Helper to save tensors as images and/or .pt files."""
+    if save_tensors:
+        torch.save(batch, path)
+
+    img_path = path.replace('.pt', '.png')
+    
+    # Simple path manipulation to insert prefix
+    directory, filename = os.path.split(img_path)
+    img_path = os.path.join(directory, f"img_{filename}")
+
+    # Create grid and save
+    grid = vutils.make_grid(batch, nrow=nrow).squeeze()
+    vutils.save_image(grid, img_path)
+
+
+def track_images(model: EndToEndModel, 
+                 data_loader: torch.utils.data.DataLoader, 
+                 loss_fn: Optional[nn.Module] = None, 
+                 device: torch.device = torch.device('cpu'), 
+                 reference_processor: Optional[nn.Module] = None, 
+                 track_processing: bool = True, 
+                 track_gradients: bool = True, 
+                 track_predictions: bool = True, 
+                 save_tensors: bool = True, 
+                 save_loc: str = 'results') -> None:
+    """
+    Debug function to track intermediate outputs, gradients, and predictions.
+    """
+    processor = model.processor
+    classifier = model.classifier
+
+    # Valid only if processor exposes intermediate stages
+    if not hasattr(processor, 'stages'):
+        return
+
+    os.makedirs(save_loc, exist_ok=True)
+
+    labels_full = []
+    logits_full = []
+    stages_full = defaultdict(list)
+    grads_full = defaultdict(list)
+    diffs_full = defaultdict(list)
+
+    track_differences = reference_processor is not None
+
+    print("Tracking images...")
+    
+    for inputs, labels in data_loader:
+        inputs = inputs.to(device) 
+        labels = labels.to(device)
+        inputs.requires_grad = True
+
+        processed_rgb = processor(inputs)
+
+        if track_differences and reference_processor is not None:
+            # reference_processor(inputs) # Run ref processor if needed
+             pass
+
+        if track_gradients or track_predictions:
+            logits = classifier(processed_rgb)
+
+            if track_gradients and loss_fn is not None:
+                model.zero_grad()
+                loss = loss_fn(logits, labels)
+                loss.backward()
+
+            if track_predictions:
+                labels_full.append(labels.detach().cpu())
+                logits_full.append(logits.detach().cpu())
+
+        # Collect stages
+        if hasattr(processor, 'stages'):
+             for stage, batch in processor.stages.items():
+                stages_full[stage].append(batch.detach().cpu())
+                
+                if track_differences and reference_processor:
+                     # Placeholder for diff logic if implemented
+                     pass
+
+                if track_gradients:
+                    batch_grad = batch.grad
+                    if batch_grad is not None:
+                         grads_full[stage].append(batch_grad.detach().cpu())
+
+    # Concatenate and Save
+    with torch.no_grad():
+        if track_processing:
+            for stage_name, batches in stages_full.items():
+                full_batch = torch.cat(batches)
+                log_tensor(full_batch, os.path.join(save_loc, f'processing_{stage_name}.pt'), save_tensors)
+
+        if track_gradients:
+            for stage_name, batches in grads_full.items():
+                full_batch = torch.cat(batches)
+                full_batch = full_batch.abs()
+                # Min-max normalization for visualization
+                if full_batch.max() > full_batch.min():
+                    full_batch = (full_batch - full_batch.min()) / (full_batch.max() - full_batch.min())
+                
+                log_tensor(full_batch, os.path.join(save_loc, f'gradients_{stage_name}.pt'), save_tensors)
+
+        if track_predictions:
+            labels_cat = torch.cat(labels_full).unsqueeze(1) # shape (N, 1)
+            logits_cat = torch.cat(logits_full)
+            
+            # Since this is classification, logits are (N, C). Visualization depends on task.
+            # Just saving raw tensors for now as per original code
+            log_tensor(labels_cat.float(), os.path.join(save_loc, 'targets.pt'), save_tensors)
+            log_tensor(logits_cat, os.path.join(save_loc, 'preds.pt'), save_tensors)
