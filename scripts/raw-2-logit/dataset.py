@@ -189,6 +189,14 @@ class MicroscopyDataset(ImageFolderDataset):
 
         final_images, final_labels = zip(*filtered_data)
         
+        # DEBUG: Print class distribution
+        from collections import Counter
+        class_counts = Counter(final_labels)
+        print("\n[DEBUG] Dataset Class Distribution:")
+        for cls, count in sorted(class_counts.items()):
+            print(f"  {cls}: {count} samples")
+        print(f"  Total: {len(final_labels)} samples\n")
+
         # Create class index mapping
         self.classes = sorted(list(set(final_labels)))
         

@@ -7,7 +7,9 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import torchvision.transforms as T
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
+
+import wandb
 
 # Local imports
 from dataset_utils import k_fold
@@ -91,6 +93,14 @@ def parse_args() -> argparse.Namespace:
                         choices=['all', 'black_level', 'white_balance', 'colour_correction',
                                  'gamma_correct', 'sharpening_filter', 'gaussian_blur', 'additive_layer'],
                         help='Target individual parameters for adversarial training.')
+    
+    # WandB arguments
+    parser.add_argument('--wandb_project', type=str, default='secqdevops-raw-microscopy',
+                        help='WandB project name')
+    parser.add_argument('--wandb_entity', type=str, default=None,
+                        help='WandB entity (username)')
+    parser.add_argument('--run_name', type=str, default=None,
+                        help='Optional run name for WandB')
 
     return parser.parse_args()
 
@@ -114,6 +124,8 @@ def train_one_epoch(model: nn.Module,
     running_loss = 0.0
     running_acc = 0.0
     
+    total_steps = len(dataloader)
+    
     for i, (inputs, labels) in enumerate(dataloader):
         inputs = inputs.to(device)
         labels = labels.to(device)
@@ -127,10 +139,18 @@ def train_one_epoch(model: nn.Module,
         optimizer.step()
         
         running_loss += loss.item()
-        running_acc += calculate_accuracy(outputs, labels)
+        batch_acc = calculate_accuracy(outputs, labels)
+        running_acc += batch_acc
         
-    avg_loss = running_loss / len(dataloader)
-    avg_acc = running_acc / len(dataloader)
+        # Log batch metrics
+        wandb.log({
+            "train/batch_loss": loss.item(),
+            "train/batch_acc": batch_acc,
+            "epoch": epoch
+        })
+        
+    avg_loss = running_loss / total_steps
+    avg_acc = running_acc / total_steps
     
     print(f"[Train] Epoch {epoch}: Loss {avg_loss:.4f} | Acc {avg_acc:.4f}")
     return avg_loss, avg_acc
@@ -144,9 +164,15 @@ def validate(model: nn.Module,
     model.eval()
     running_loss = 0.0
     running_acc = 0.0
+    total_steps = len(dataloader)
+    
+    # For ISP visualization (once per validation)
+    vis_inputs = None
+    vis_predictions = None
+    vis_labels = None
     
     with torch.no_grad():
-        for inputs, labels in dataloader:
+        for i, (inputs, labels) in enumerate(dataloader):
             inputs = inputs.to(device)
             labels = labels.to(device)
             
@@ -156,10 +182,44 @@ def validate(model: nn.Module,
             running_loss += loss.item()
             running_acc += calculate_accuracy(outputs, labels)
             
-    avg_loss = running_loss / len(dataloader)
-    avg_acc = running_acc / len(dataloader)
+            # Save first batch for visualization
+            if i == 0:
+                vis_inputs = inputs
+                vis_predictions = outputs
+                vis_labels = labels
+            
+    avg_loss = running_loss / total_steps
+    avg_acc = running_acc / total_steps
     
     print(f"[Val]   Loss {avg_loss:.4f} | Acc {avg_acc:.4f}")
+    
+    # Log visuals if possible
+    if vis_inputs is not None:
+        try:
+             # If model has a processor, we can visualize the intermediate output
+            if model.processor is not None:
+                processed_imgs = model.processor(vis_inputs)
+                
+                # Take first 8 images
+                n_vis = min(8, processed_imgs.size(0))
+                images_to_log = []
+                
+                for idx in range(n_vis):
+                    img = processed_imgs[idx].cpu().detach()
+                    # Denormalize if needed or just clamp for visualization
+                    img = torch.clamp(img, 0, 1)
+                    
+                    pred_cls = torch.argmax(vis_predictions[idx]).item()
+                    true_cls = vis_labels[idx].item()
+                    
+                    images_to_log.append(
+                        wandb.Image(img, caption=f"Pred: {pred_cls} | True: {true_cls}")
+                    )
+                
+                wandb.log({"val/processed_images": images_to_log}, commit=False)
+        except Exception as e:
+            print(f"[Warning] Could not log images to WandB: {e}")
+            
     return avg_loss, avg_acc
 
 
@@ -180,6 +240,19 @@ def run_train(args: argparse.Namespace) -> None:
 
     for k_iter, (train_indices, valid_indices) in enumerate(idxs_kfold):
         print(f'\n--- Starting Fold {k_iter + 1}/{args.n_splits} ---')
+        
+        # Initialize WandB per fold
+        config = vars(args)
+        config['fold'] = k_iter
+        
+        wandb.init(
+            project=args.wandb_project,
+            entity=args.wandb_entity,
+            name=args.run_name or f"{args.dataset}_{args.processing_mode}_fold_{k_iter}",
+            config=config,
+            reinit=True
+        )
+        
         print(f'Processing Mode: {args.processing_mode}')
 
         # 4. Configure Processing Pipeline
@@ -253,7 +326,24 @@ def run_train(args: argparse.Namespace) -> None:
         print(f"Model moved to {DEVICE}")
 
         # 7. Setup Training State
-        criterion = nn.CrossEntropyLoss()
+        
+        # Calculate class weights for loss function
+        targets = [dataset.labels[i] for i in train_indices]
+        from collections import Counter
+        counts = Counter(targets)
+        class_weights = []
+        for i in range(len(dataset.classes)):
+            # Weight = Total / (NumClasses * Count)
+            if counts[i] > 0:
+                class_weights.append(1.0 / counts[i])
+            else:
+                class_weights.append(0.0) # Should not happen if data is filtered correctly
+        
+        class_weights_tensor = torch.FloatTensor(class_weights).to(DEVICE)
+        print(f"[Info] Using Weighted Cross Entropy Loss: {class_weights}")
+
+        criterion = nn.CrossEntropyLoss(weight=class_weights_tensor)
+        
         optimizer = optim.Adam(model.parameters(), lr=args.lr)
 
         # Prepare state dict for saving
@@ -295,9 +385,36 @@ def run_train(args: argparse.Namespace) -> None:
         train_set = Subset(dataset, indices=train_indices)
         valid_set = Subset(dataset, indices=valid_indices)
 
+        # Calculate class weights for WeightedRandomSampler to handle class imbalance
+        # 1. Get all targets from the training set
+        train_targets = [dataset.labels[i] for i in train_indices]
+        
+        # 2. Count samples per class
+        from collections import Counter
+        class_counts = Counter(train_targets)
+        
+        # 3. Calculate weight for each sample
+        # Weight for class C = TotalSamples / (NumClasses * SamplesInClassC)
+        # But for WeightedRandomSampler we just need the weight for each sample
+        sample_weights = []
+        for i in train_indices:
+            label = dataset.labels[i]
+            # Higher weight for rarer classes
+            weight = 1.0 / class_counts[label]
+            sample_weights.append(weight)
+            
+        sample_weights = torch.DoubleTensor(sample_weights)
+        
+        # 4. Create sampler
+        # num_samples can be len(train_set) or even larger if we want oversampling per epoch
+        sampler = WeightedRandomSampler(weights=sample_weights, num_samples=len(train_set), replacement=True)
+
+        print("[Info] Using WeightedRandomSampler to handle class imbalance.")
+
+        # Note: shuffle must be False when sampler is used
         train_loader = DataLoader(
             train_set, batch_size=args.batch_size, 
-            num_workers=args.num_workers, shuffle=True
+            num_workers=args.num_workers, sampler=sampler, shuffle=False
         )
         valid_loader = DataLoader(
             valid_set, batch_size=args.batch_size, 
@@ -308,20 +425,35 @@ def run_train(args: argparse.Namespace) -> None:
         best_acc = 0.0
         print("Starting training loop...")
         
+        # Watch model gradients
+        wandb.watch(model, log='gradients', log_freq=100)
+        
         for epoch in range(1, args.epochs + 1):
-            train_one_epoch(model, train_loader, criterion, optimizer, DEVICE, epoch)
+            train_loss, train_acc = train_one_epoch(model, train_loader, criterion, optimizer, DEVICE, epoch)
             
             if epoch % args.check_val_every_n_epoch == 0:
                 val_loss, val_acc = validate(model, valid_loader, criterion, DEVICE)
+                
+                # Log Epoch Metrics
+                wandb.log({
+                    "train/loss": train_loss,
+                    "train/acc": train_acc,
+                    "val/loss": val_loss,
+                    "val/acc": val_acc,
+                    "epoch": epoch
+                })
                 
                 if val_acc > best_acc:
                     best_acc = val_acc
                     torch.save(model.state_dict(), os.path.join(run_dir, 'model_best.pth'))
                     print(f" -> New best model saved (Acc: {best_acc:.4f})")
+                    wandb.run.summary["best_accuracy"] = best_acc
         
         # Save final model
         torch.save(model.state_dict(), os.path.join(run_dir, 'model_final.pth'))
         print("Training complete.")
+        
+        wandb.finish()
 
 
 if __name__ == "__main__":
