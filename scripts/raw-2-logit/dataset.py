@@ -154,10 +154,10 @@ class MicroscopyDataset(ImageFolderDataset):
         
         # Note: Directory structure logic is hardcoded here. 
         # Ideally, this should be configurable.
-        img_folder_name = f'images/raw_scale{int(intensity_ratio * 100):03d}'
+        img_folder_name = f'images\\raw_scale{int(intensity_ratio * 100):03d}'
         self.img_dir = os.path.join(root_dir, img_folder_name)
         
-        label_file = os.path.join(root_dir, 'labels/Ma190c_annotations.dat')
+        label_file = os.path.join(root_dir, 'labels\\Ma190c_annotations.dat')
         
         if not os.path.exists(label_file):
             raise FileNotFoundError(f"Label file not found at: {label_file}")
@@ -188,14 +188,6 @@ class MicroscopyDataset(ImageFolderDataset):
             raise RuntimeError("No valid images found after filtering.")
 
         final_images, final_labels = zip(*filtered_data)
-        
-        # DEBUG: Print class distribution
-        from collections import Counter
-        class_counts = Counter(final_labels)
-        print("\n[DEBUG] Dataset Class Distribution:")
-        for cls, count in sorted(class_counts.items()):
-            print(f"  {cls}: {count} samples")
-        print(f"  Total: {len(final_labels)} samples\n")
 
         # Create class index mapping
         self.classes = sorted(list(set(final_labels)))
