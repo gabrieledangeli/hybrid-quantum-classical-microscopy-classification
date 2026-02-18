@@ -152,8 +152,7 @@ class MicroscopyDataset(ImageFolderDataset):
 
         self.root_dir = root_dir
         
-        # Note: Directory structure logic is hardcoded here. 
-        # Ideally, this should be configurable.
+        # NOTE: Directory structure logic is hardcoded here.
         img_folder_name = f'images\\raw_scale{int(intensity_ratio * 100):03d}'
         self.img_dir = os.path.join(root_dir, img_folder_name)
         
