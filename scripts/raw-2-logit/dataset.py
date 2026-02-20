@@ -41,7 +41,7 @@ class ImageFolderDataset(Dataset):
                  img_dir: str, 
                  labels: List[Any], 
                  transform: Optional[Callable] = None, 
-                 bits: int = 1):
+                 bits: int = 8):
         self.img_dir = img_dir
         self.labels = labels
         self.transform = transform
@@ -151,18 +151,15 @@ class MicroscopyDataset(ImageFolderDataset):
             raise ValueError(f"Invalid intensity_ratio: {intensity_ratio}, only 1.0 is currently supported for Raw.")
 
         self.root_dir = root_dir
+        self.img_dir = os.path.join(root_dir, 'images', f'raw_scale{int(intensity_ratio * 100):03d}')
+
+        if not os.path.exists(self.img_dir):
+            raise FileNotFoundError(f"Image directory not found at: {self.img_dir}")
         
-        # NOTE: Directory structure logic is hardcoded here.
-        img_folder_name = f'images\\raw_scale{int(intensity_ratio * 100):03d}'
-        self.img_dir = os.path.join(root_dir, img_folder_name)
-        
-        label_file = os.path.join(root_dir, 'labels\\Ma190c_annotations.dat')
+        label_file = os.path.join(root_dir, 'labels', 'Ma190c_annotations.dat')
         
         if not os.path.exists(label_file):
             raise FileNotFoundError(f"Label file not found at: {label_file}")
-            
-        if not os.path.exists(self.img_dir):
-            print(f"Warning: Image directory not found at: {self.img_dir}")
 
         self.valid_classes_list = VALID_CLASSES
         self.invalid_files = {'Ma190c_lame3_zone13_composite_Mcropped_2.tiff'}
@@ -231,8 +228,7 @@ class MicroscopyDatasetRGB(MicroscopyDataset):
                  root_dir: str, 
                  intensity_ratio: float = 1.0, 
                  transform: Optional[Callable] = None, 
-                 bits: int = 16, 
-                 force_download: bool = False):
+                 bits: int = 16):
         
         super().__init__(
             root_dir=root_dir, 
@@ -241,6 +237,5 @@ class MicroscopyDatasetRGB(MicroscopyDataset):
             bits=bits
         )
         # Modify paths to point to RGB images instead of RAW
-        # Assuming filename structure allows simple replacement
         self.images = [image.replace('raw', 'rgb') for image in self.images]
 

@@ -10,14 +10,14 @@ from scipy import fftpack
 from scipy.signal import convolve2d
 
 from skimage.filters import unsharp_mask
-from skimage.color import rgb2yuv, yuv2rgb, rgb2hsv, hsv2rgb
-from skimage.restoration import denoise_tv_chambolle, denoise_tv_bregman, denoise_nl_means, denoise_bilateral, denoise_wavelet, estimate_sigma
+from skimage.color import rgb2yuv, yuv2rgb
+from skimage.restoration import denoise_tv_chambolle, denoise_tv_bregman, denoise_bilateral 
 
 import matplotlib.pyplot as plt
 
-from colour_demosaicing import (demosaicing_CFA_Bayer_bilinear, # type: ignore
-                                demosaicing_CFA_Bayer_Malvar2004, # type: ignore
-                                demosaicing_CFA_Bayer_Menon2007) # type: ignore
+from colour_demosaicing import (demosaicing_CFA_Bayer_bilinear,
+                                demosaicing_CFA_Bayer_Malvar2004,
+                                demosaicing_CFA_Bayer_Menon2007)
 
 import torch
 import numpy as np
@@ -29,7 +29,7 @@ class RawProcessingPipeline(object):
 
     """Applies the raw-processing pipeline from pipeline.py"""
 
-    def __init__(self, camera_parameters, debayer='bilinear', sharpening='unsharp_masking', denoising='gaussian'):
+    def __init__(self, camera_parameters, debayer='bilinear', sharpening='unsharp_masking', denoising='gaussian_denoising'):
         '''
         Args:
             camera_parameters (tuple): (black_level, white_balance, colour_matrix)
@@ -60,7 +60,7 @@ class RawProcessingPipeline(object):
 
 
 def processing(img, black_level, white_balance, colour_matrix, debayer="bilinear", sharpening="unsharp_masking",
-               sharp_radius=1.0, sharp_amount=1.0, denoising="median_filter", median_kernel_size=3,
+               sharp_radius=1.0, sharp_amount=1.0, denoising="median_denoising", median_kernel_size=3,
                gaussian_sigma=0.5, fft_fraction=0.3, weight_chambolle=0.01, weight_bregman=100,
                sigma_bilateral=0.6, gamma=2.2, bits=16):
     """Apply pipeline on a raw image
@@ -83,10 +83,12 @@ def processing(img, black_level, white_balance, colour_matrix, debayer="bilinear
     # Apply demosaicing - We don't have access to these 3 functions
     if debayer == "bilinear":
         img = demosaicing_CFA_Bayer_bilinear(img)
-    if debayer == "malvar2004":
+    elif debayer == "malvar2004":
         img = demosaicing_CFA_Bayer_Malvar2004(img)
-    if debayer == "menon2007":
+    elif debayer == "menon2007":
         img = demosaicing_CFA_Bayer_Menon2007(img)
+    else:
+        raise ValueError(f"Unknown debayer method: {debayer}")
 
     # White Balance Correction
 
@@ -102,29 +104,31 @@ def processing(img, black_level, white_balance, colour_matrix, debayer="bilinear
     # Sharpening
     if sharpening == "sharpening_filter":  # Fixed sharpening
         img = sharpening_filter(img)
-    if sharpening == "unsharp_masking":  # Higher is radius and amount, higher is the sharpening
-        img = unsharp_masking(img, radius=sharp_radius, amount=sharp_amount, multichannel=True)
+    elif sharpening == "unsharp_masking":  # Higher is radius and amount, higher is the sharpening
+        img = unsharp_masking(img, radius=sharp_radius, amount=sharp_amount, channel_axis=-1)
+    else:
+        # Assuming 'none' or passing through if unknown/handled externally, or raise error?
+        # Original code didn't raise, just skipped. But requirement says "sollevare ValueError per valori sconosciuti"
+        if sharpening != 'none':
+             raise ValueError(f"Unknown sharpening method: {sharpening}")
 
     # Denoising
     if denoising == "median_denoising":
         img = median_denoising(img, size=median_kernel_size)
-    if denoising == "gaussian_denoising":
+    elif denoising == "gaussian_denoising":
         img = gaussian_denoising(img, sigma=gaussian_sigma)
-    if denoising == "fft_denoising":  # fft_fraction = [0.0001,0.5]
+    elif denoising == "fft_denoising":  # fft_fraction = [0.0001,0.5]
         img = fft_denoising(img, keep_fraction=fft_fraction, row_cut=False, column_cut=True)
-
-    # We don't have access to these 3 functions
-    if denoising == "tv_chambolle":  # lower is weight, less is the denoising
-        img = denoise_tv_chambolle(img, weight=weight_chambolle, eps=0.0002, n_iter_max=200, multichannel=True)
-    if denoising == "tv_bregman":  # lower is weight, more is the denoising
+    elif denoising == "tv_chambolle":  # lower is weight, less is the denoising
+        img = denoise_tv_chambolle(img, weight=weight_chambolle, eps=0.0002, n_iter_max=200, channel_axis=-1)
+    elif denoising == "tv_bregman":  # lower is weight, more is the denoising
         img = denoise_tv_bregman(img, weight=weight_bregman, max_iter=100,
-                                 eps=0.001, isotropic=True, multichannel=True)
-#     if denoising == "wavelet":
-#         img = denoise_wavelet(img.copy(), sigma=None, wavelet='db1', mode='soft', wavelet_levels=None, multichannel=True,
-#                 convert2ycbcr=False, method='BayesShrink', rescale_sigma=True)
-    if denoising == "bilateral":  # higher is sigma_spatial, more is the denoising
+                                 eps=0.001, isotropic=True, channel_axis=-1)
+    elif denoising == "bilateral":  # higher is sigma_spatial, more is the denoising
         img = denoise_bilateral(img, win_size=None, sigma_color=None, sigma_spatial=sigma_bilateral,
-                                bins=10000, mode='constant', cval=0, multichannel=True)
+                                bins=10000, mode='constant', cval=0, channel_axis=-1)
+    elif denoising != 'none':
+        raise ValueError(f"Unknown denoising method: {denoising}")
 
     # Gamma Correction
     img = np.clip(img, 0, 1)
@@ -160,11 +164,11 @@ def colour_correction(img, colour_matrix):
 
 
 def unsharp_masking(img, radius=1.0, amount=1.0,
-                    multichannel=False, preserve_range=True):
+                    channel_axis=-1, preserve_range=True):
 
     img = rgb2yuv(img)
     img[:, :, 0] = unsharp_mask(img[:, :, 0], radius=radius, amount=amount,
-                                multichannel=multichannel, preserve_range=preserve_range)
+                                channel_axis=None, preserve_range=preserve_range)
     img = yuv2rgb(img)
     return img
 
@@ -206,11 +210,11 @@ def fft_denoising(img, keep_fraction=0.3, row_cut=False, column_cut=True):
         keep_fraction --> 0 --> remove all details """
 #   http://scipy-lectures.org/intro/scipy/auto_examples/solutions/plot_fft_image_denoise.html
 
-    im_fft = fftpack.fft2(img)
+    # Apply FFT on spatial dimensions (0, 1) assuming img is (H, W, C)
+    im_fft = fftpack.fft2(img, axes=(0, 1))
 
-    # Call ff a copy of the original transform. Numpy arrays have a copy
-    # method for this purpose.
-    im_fft2 = im_fft
+    # Perform a real copy
+    im_fft2 = im_fft.copy()
 
     # Set r and c to be the number of rows and columns of the array.
     r, c, _ = im_fft2.shape
@@ -225,7 +229,7 @@ def fft_denoising(img, keep_fraction=0.3, row_cut=False, column_cut=True):
 
     # Reconstruct the denoised image from the filtered spectrum, keep only the
     # real part for display.
-    im_new = fftpack.ifft2(im_fft2).real
+    im_new = fftpack.ifft2(im_fft2, axes=(0, 1)).real
 
     return im_new
 

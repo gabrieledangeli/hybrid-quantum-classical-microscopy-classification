@@ -132,9 +132,9 @@ class NNProcessing(nn.Module):
         return rgb
 
 
-def append_additive_layer(processor):
-    processor.additive_layer = nn.Parameter(torch.zeros((1, 3, 256, 256)))
-    # processor.additive_layer = nn.Parameter(0.001 * torch.randn((1, 3, 256, 256)))
+def append_additive_layer(processor, shape=(1, 3, 256, 256)):
+    processor.additive_layer = nn.Parameter(torch.zeros(shape))
+    # processor.additive_layer = nn.Parameter(0.001 * torch.randn(shape))
 
 
 class ParametrizedProcessing(nn.Module):
@@ -198,24 +198,34 @@ class ParametrizedProcessing(nn.Module):
         self.stages['color_correct'] = rgb
 
         yuv = torch.einsum('bchw,kc->bkhw', rgb, self.M_RGB_2_YUV).contiguous()
-        yuv[:, [0], ...] = self.sharpening_filter(yuv[:, [0], ...])
+        
+        # Avoid in-place modification for autograd safety
+        # yuv[:, [0], ...] = self.sharpening_filter(yuv[:, [0], ...])
+        y_channel = self.sharpening_filter(yuv[:, [0], ...])
+        yuv = torch.cat([y_channel, yuv[:, 1:, ...]], dim=1)
 
         if self.track_stages:    # keep stage in computational graph for grad information
             rgb = torch.einsum('bchw,kc->bkhw', yuv.clone(), self.M_YUV_2_RGB).contiguous()
             self.stages['sharpening'] = rgb
             yuv = torch.einsum('bchw,kc->bkhw', rgb, self.M_RGB_2_YUV).contiguous()
 
-        yuv[:, [0], ...] = self.gaussian_blur(yuv[:, [0], ...])
+        # yuv[:, [0], ...] = self.gaussian_blur(yuv[:, [0], ...])
+        y_channel = self.gaussian_blur(yuv[:, [0], ...])
+        yuv = torch.cat([y_channel, yuv[:, 1:, ...]], dim=1)
+        
         rgb = torch.einsum('bchw,kc->bkhw', yuv, self.M_YUV_2_RGB).contiguous()
         self.stages['gaussian'] = rgb
 
         rgb = torch.clip(rgb, 1e-5, 1)
         self.stages['clipped'] = rgb
 
-        rgb = torch.exp((1 / self.gamma_correct) * torch.log(rgb))
+        # Softplus to ensure positive gamma
+        gamma = torch.nn.functional.softplus(self.gamma_correct) + 1e-6
+        rgb = torch.exp((1 / gamma) * torch.log(rgb))
         self.stages['gamma_correct'] = rgb
 
         if self.additive_layer is not None:
+             # Handle shape mismatch if necessary or let it broadcast/fail
             rgb = rgb + self.additive_layer
             self.stages['noise'] = rgb
 
@@ -256,15 +266,25 @@ def raw2rgb(raw, black_level=None, reduce_size=True, out_channels=3):
             The two green channels are averaged if out_channels == 3.
     """
     assert out_channels in [3, 4]
+    
+    # Check for even dimensions to avoid indexing errors
+    Bch, H, W = raw.shape
+    assert H % 2 == 0 and W % 2 == 0, f"Image dimensions must be even for Bayer unpacking, got ({H}, {W})"
+    
     if black_level is None:
         black_level = [0, 0, 0, 0]
-    Bch, H, W = raw.shape
+    
+    # Ensure raw is float
+    if not raw.is_floating_point():
+         raw = raw.float()
+         
     R = raw[:, 0::2, 0::2] - black_level[0]     # R
     G1 = raw[:, 0::2, 1::2] - black_level[1]    # G
     G2 = raw[:, 1::2, 0::2] - black_level[2]    # G
     B = raw[:, 1::2, 1::2] - black_level[3]     # B
+    
     if reduce_size:
-        rgb = torch.zeros((Bch, out_channels, H // 2, W // 2), device=raw.device)
+        rgb = torch.zeros((Bch, out_channels, H // 2, W // 2), device=raw.device, dtype=raw.dtype)
         if out_channels == 3:
             rgb[:, 0, :, :] = R
             rgb[:, 1, :, :] = (G1 + G2) / 2
@@ -275,7 +295,7 @@ def raw2rgb(raw, black_level=None, reduce_size=True, out_channels=3):
             rgb[:, 2, :, :] = G2
             rgb[:, 3, :, :] = B
     else:
-        rgb = torch.zeros((Bch, out_channels, H, W), device=raw.device)
+        rgb = torch.zeros((Bch, out_channels, H, W), device=raw.device, dtype=raw.dtype)
         if out_channels == 3:
             rgb[:, 0, 0::2, 0::2] = R
             rgb[:, 1, 0::2, 1::2] = G1

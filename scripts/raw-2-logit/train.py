@@ -12,6 +12,7 @@ from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
 import wandb
 
 # Local imports
+from args import parse_args
 from dataset_utils import k_fold
 from augmentation import get_augmentation, set_global_seed
 from dataset import Subset, get_dataset
@@ -22,95 +23,12 @@ from model import resnet_model, EndToEndModel
 # Global Constants
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-
-def parse_args() -> argparse.Namespace:
-    """Parses command line arguments."""
-    parser = argparse.ArgumentParser(
-        description='SecQDevOps QML Raw-Microscopy Classification Training Script'
-    )
-
-    # Dataset arguments
-    parser.add_argument('--dataset', type=str, default='Microscopy',
-                        choices=['Microscopy', 'MicroscopyRGB'],
-                        help='Dataset to use for training and evaluation.')
-    parser.add_argument('--data_dir', type=str, default='./data',
-                        help='Path to dataset root directory')
-    parser.add_argument('--num_workers', type=int, default=8,
-                        help='Number of data loading workers')
-    
-    # Cross-validation arguments
-    parser.add_argument('--n_splits', type=int, default=1,
-                        help='Number of splits (folds) used for cross-validation.')
-    parser.add_argument('--seed', type=int, default=20,
-                        help='Seed used for reproducibility.')
-    parser.add_argument('--train_size', type=float, default=0.8,
-                        help='Proportion of the dataset to include in the train split.')
-
-    # Processing arguments
-    parser.add_argument('--processing_mode', type=str, default='static',
-                        choices=['parametrized', 'static', 'neural_network', 'none'],
-                        help='Type of processing to apply to raw images.')
-    parser.add_argument('--sp_debayer', type=str, default='bilinear',
-                        choices=['bilinear', 'malvar2004', 'menon2007'],
-                        help='Algorithm used for debayering.')
-    parser.add_argument('--sp_sharpening', type=str, default='sharpening_filter',
-                        choices=['sharpening_filter', 'unsharp_masking'],
-                        help='Algorithm used for sharpening.')
-    parser.add_argument('--sp_denoising', type=str, default='gaussian_denoising',
-                        choices=['gaussian_denoising', 'median_denoising', 'fft_denoising'],
-                        help='Algorithm used for denoising.')
-    
-    # Model freezing arguments
-    parser.add_argument('--freeze_processor', action='store_true',
-                        help='Freeze raw to rgb processing model weights.')
-    parser.add_argument('--freeze_classifier', action='store_true',
-                        help='Freeze classification model weights.')
-
-    # Training arguments
-    parser.add_argument('--augmentation', type=str, default='none',
-                        choices=['none', 'weak', 'strong'],
-                        help='Applies augmentation to training.')
-    parser.add_argument('--test_run', action='store_true',
-                        help='Run training with only one batch for testing.')
-    parser.add_argument('--batch_size', type=int, default=32,
-                        help='Training batch size.')
-    parser.add_argument('--lr', type=float, default=1e-5,
-                        help='Learning rate used for training.')
-    parser.add_argument('--epochs', type=int, default=10,
-                        help='Number of epochs.')
-    parser.add_argument('--check_val_every_n_epoch', type=int, default=1,
-                        help='Frequency of validation checks.')
-    
-    # Classifier arguments
-    parser.add_argument('--classifier_network', type=str, default='ResNet18',
-                        choices=['ResNet18', 'ResNet34', 'Resnet50'],
-                        help='Type of pretrained network.')
-    parser.add_argument('--classifier_pretrained', action='store_true',
-                        help='Whether to use a pre-trained model or not.')
-    
-    # Adversarial arguments
-    parser.add_argument('--adv_parameters',
-                        choices=['all', 'black_level', 'white_balance', 'colour_correction',
-                                 'gamma_correct', 'sharpening_filter', 'gaussian_blur', 'additive_layer'],
-                        help='Target individual parameters for adversarial training.')
-    
-    # WandB arguments
-    parser.add_argument('--wandb_project', type=str, default='secqdevops-raw-microscopy',
-                        help='WandB project name')
-    parser.add_argument('--wandb_entity', type=str, default=None,
-                        help='WandB entity (username)')
-    parser.add_argument('--run_name', type=str, default=None,
-                        help='Optional run name for WandB')
-
-    return parser.parse_args()
-
-
-def calculate_accuracy(output: torch.Tensor, target: torch.Tensor) -> float:
-    """Computes the accuracy of the model predictions."""
+def calculate_accuracy(output: torch.Tensor, target: torch.Tensor) -> Tuple[int, int]:
+    """Computes the number of correct predictions and total samples."""
     with torch.no_grad():
         pred = torch.argmax(output, dim=1)
         correct = pred.eq(target.view_as(pred)).sum().item()
-        return correct / len(target)
+        return correct, len(target)
 
 
 def train_one_epoch(model: nn.Module,
@@ -122,9 +40,13 @@ def train_one_epoch(model: nn.Module,
     """Running training for one epoch."""
     model.train()
     running_loss = 0.0
-    running_acc = 0.0
+    
+    total_correct = 0
+    total_samples = 0
     
     total_steps = len(dataloader)
+    if total_steps == 0:
+        raise RuntimeError("Training dataloader is empty. Check dataset and split configuration.")
     
     for i, (inputs, labels) in enumerate(dataloader):
         inputs = inputs.to(device)
@@ -139,8 +61,13 @@ def train_one_epoch(model: nn.Module,
         optimizer.step()
         
         running_loss += loss.item()
-        batch_acc = calculate_accuracy(outputs, labels)
-        running_acc += batch_acc
+        
+        # Calculate batch accuracy for logging/accumulation
+        batch_correct, batch_size = calculate_accuracy(outputs, labels)
+        total_correct += batch_correct
+        total_samples += batch_size
+        
+        batch_acc = batch_correct / batch_size
         
         # Log batch metrics
         wandb.log({
@@ -149,8 +76,11 @@ def train_one_epoch(model: nn.Module,
             "epoch": epoch
         })
         
+    # Average loss per batch
     avg_loss = running_loss / total_steps
-    avg_acc = running_acc / total_steps
+    
+    # Accuracy over the whole epoch
+    avg_acc = total_correct / total_samples if total_samples > 0 else 0.0
     
     print(f"[Train] Epoch {epoch}: Loss {avg_loss:.4f} | Acc {avg_acc:.4f}")
     return avg_loss, avg_acc
@@ -163,8 +93,12 @@ def validate(model: nn.Module,
     """Running validation."""
     model.eval()
     running_loss = 0.0
-    running_acc = 0.0
+    total_correct = 0
+    total_samples = 0
+    
     total_steps = len(dataloader)
+    if total_steps == 0:
+        raise RuntimeError("Validation dataloader is empty. Check dataset and split configuration.")
     
     # For ISP visualization (once per validation)
     vis_inputs = None
@@ -180,7 +114,10 @@ def validate(model: nn.Module,
             loss = criterion(outputs, labels)
             
             running_loss += loss.item()
-            running_acc += calculate_accuracy(outputs, labels)
+            
+            batch_correct, batch_size = calculate_accuracy(outputs, labels)
+            total_correct += batch_correct
+            total_samples += batch_size
             
             # Save first batch for visualization
             if i == 0:
@@ -189,7 +126,7 @@ def validate(model: nn.Module,
                 vis_labels = labels
             
     avg_loss = running_loss / total_steps
-    avg_acc = running_acc / total_steps
+    avg_acc = total_correct / total_samples if total_samples > 0 else 0.0
     
     print(f"[Val]   Loss {avg_loss:.4f} | Acc {avg_acc:.4f}")
     
@@ -198,7 +135,8 @@ def validate(model: nn.Module,
         try:
              # If model has a processor, we can visualize the intermediate output
             if model.processor is not None:
-                processed_imgs = model.processor(vis_inputs)
+                with torch.no_grad():
+                    processed_imgs = model.processor(vis_inputs)
                 
                 # Take first 8 images
                 n_vis = min(8, processed_imgs.size(0))
@@ -236,28 +174,43 @@ def run_train(args: argparse.Namespace) -> None:
     set_global_seed(args.seed)
 
     # 3. Create K-Fold splits
-    idxs_kfold = k_fold(dataset, n_splits=args.n_splits, seed=args.seed, train_size=args.train_size)
+    idxs_kfold = k_fold(dataset, n_splits=args.n_splits, seed=args.seed, train_size=args.train_size, strategy=args.cv_strategy)
 
     for k_iter, (train_indices, valid_indices) in enumerate(idxs_kfold):
         print(f'\n--- Starting Fold {k_iter + 1}/{args.n_splits} ---')
         
         # Initialize WandB per fold
-        config = vars(args)
+        config = vars(args).copy()
         config['fold'] = k_iter
         
         wandb.init(
             project=args.wandb_project,
             entity=args.wandb_entity,
             name=args.run_name or f"{args.dataset}_{args.processing_mode}_fold_{k_iter}",
-            config=config,
-            reinit=True
+            config=config
         )
         
         print(f'Processing Mode: {args.processing_mode}')
 
         # 4. Configure Processing Pipeline
         processor = None
-        if args.processing_mode == 'static':
+        is_rgb_dataset = args.dataset == 'MicroscopyRGB'
+
+        if is_rgb_dataset:
+             # Basic normalization for RGB images
+             # Using ImageNet stats as default or dataset specific if available
+             mean = dataset.dataset_mean or [0.485, 0.456, 0.406]
+             std = dataset.dataset_std or [0.229, 0.224, 0.225]
+             
+             dataset.transform = T.Compose([
+                 T.ToTensor(), # dataset.py returns numpy, need to convert to tensor first if not already
+                 T.Normalize(mean, std)
+             ])
+             # Ensure processor is None for RGB dataset as we don't need raw processing
+             if args.processing_mode != 'static':
+                 print(f"Warning: Processing mode '{args.processing_mode}' ignored for RGB dataset.")
+
+        elif args.processing_mode == 'static':
             # Mean and Std for normalization
             mean = torch.tensor([0.91, 0.84, 0.94])
             std = torch.tensor([0.08, 0.12, 0.05])
@@ -299,7 +252,6 @@ def run_train(args: argparse.Namespace) -> None:
         classifier = resnet_model(
             model_name=args.classifier_network,
             pretrained=args.classifier_pretrained,
-            in_channels=3,
             fc_out_features=len(dataset.classes)
         )
 
@@ -309,7 +261,7 @@ def run_train(args: argparse.Namespace) -> None:
                 print('Note: Freezing processor requested but it has no learnable parameters.')
         
         if args.freeze_processor and args.freeze_classifier:
-             raise ValueError("Both processor and classifier are frozen. Nothing to train.")
+            raise ValueError("Both processor and classifier are frozen. Nothing to train.")
 
         # 6. Initialize End-to-End Model
         augmentation = get_augmentation(args.augmentation)
@@ -324,25 +276,41 @@ def run_train(args: argparse.Namespace) -> None:
         model = model.to(DEVICE)
         
         print(f"Model moved to {DEVICE}")
-
         # 7. Setup Training State
         
-        # Calculate class weights for loss function
+        # Calculate class counts from training subset
         targets = [dataset.labels[i] for i in train_indices]
         from collections import Counter
-        counts = Counter(targets)
-        class_weights = []
-        for i in range(len(dataset.classes)):
-            # Weight = Total / (NumClasses * Count)
-            if counts[i] > 0:
-                class_weights.append(1.0 / counts[i])
-            else:
-                class_weights.append(0.0) # Should not happen if data is filtered correctly
+        class_counts = Counter(targets)
         
-        class_weights_tensor = torch.FloatTensor(class_weights).to(DEVICE)
-        print(f"[Info] Using Weighted Cross Entropy Loss: {class_weights}")
+        # Prepare Imbalance Handling Strategy
+        sampler = None
+        criterion_weight = None
+        
+        if args.imbalance_handling == 'loss':
+            class_weights = []
+            for i in range(len(dataset.classes)):
+                if class_counts[i] > 0:
+                    class_weights.append(1.0 / class_counts[i])
+                else:
+                    class_weights.append(0.0)
+            criterion_weight = torch.FloatTensor(class_weights).to(DEVICE)
+            print("[Info] Using Weighted Cross Entropy Loss to handle class imbalance.")
+            
+        elif args.imbalance_handling == 'sampler':
+            # Calculate weight for each sample for WeightedRandomSampler
+            sample_weights = []
+            for i in train_indices:
+                label = dataset.labels[i]
+                weight = 1.0 / class_counts[label] if class_counts[label] > 0 else 0.0
+                sample_weights.append(weight)
+            sample_weights = torch.DoubleTensor(sample_weights)
+            
+            sampler = WeightedRandomSampler(weights=sample_weights, num_samples=len(train_indices), replacement=True)
+            print("[Info] Using WeightedRandomSampler to handle class imbalance.")
 
-        criterion = nn.CrossEntropyLoss(weight=class_weights_tensor)
+        # Initialize Criterion with or without weights
+        criterion = nn.CrossEntropyLoss(weight=criterion_weight)
         
         optimizer = optim.Adam(model.parameters(), lr=args.lr)
 
@@ -376,45 +344,17 @@ def run_train(args: argparse.Namespace) -> None:
         with open(os.path.join(run_dir, 'hparams.txt'), 'w') as f:
              f.write('\n'.join([f'{k}={v}' for k, v in hparams.items()]))
 
-        # 8. Prepare DataLoaders
-        if args.test_run:
-            print("Test Run: Limiting dataset to single batch.")
-            train_indices = train_indices[:args.batch_size]
-            valid_indices = valid_indices[:args.batch_size]
-
         train_set = Subset(dataset, indices=train_indices)
         valid_set = Subset(dataset, indices=valid_indices)
 
-        # Calculate class weights for WeightedRandomSampler to handle class imbalance
-        # 1. Get all targets from the training set
-        train_targets = [dataset.labels[i] for i in train_indices]
-        
-        # 2. Count samples per class
-        from collections import Counter
-        class_counts = Counter(train_targets)
-        
-        # 3. Calculate weight for each sample
-        # Weight for class C = TotalSamples / (NumClasses * SamplesInClassC)
-        # But for WeightedRandomSampler we just need the weight for each sample
-        sample_weights = []
-        for i in train_indices:
-            label = dataset.labels[i]
-            # Higher weight for rarer classes
-            weight = 1.0 / class_counts[label]
-            sample_weights.append(weight)
+        # DataLoader setup
+        shuffle = True
+        if sampler is not None:
+            shuffle = False
             
-        sample_weights = torch.DoubleTensor(sample_weights)
-        
-        # 4. Create sampler
-        # num_samples can be len(train_set) or even larger if we want oversampling per epoch
-        sampler = WeightedRandomSampler(weights=sample_weights, num_samples=len(train_set), replacement=True)
-
-        print("[Info] Using WeightedRandomSampler to handle class imbalance.")
-
-        # Note: shuffle must be False when sampler is used
         train_loader = DataLoader(
             train_set, batch_size=args.batch_size, 
-            num_workers=args.num_workers, sampler=sampler, shuffle=False
+            num_workers=args.num_workers, sampler=sampler, shuffle=shuffle
         )
         valid_loader = DataLoader(
             valid_set, batch_size=args.batch_size, 
@@ -442,18 +382,17 @@ def run_train(args: argparse.Namespace) -> None:
                     "val/acc": val_acc,
                     "epoch": epoch
                 })
-                
+
                 if val_acc > best_acc:
                     best_acc = val_acc
-                    torch.save(model.state_dict(), os.path.join(run_dir, 'model_best.pth'))
-                    print(f" -> New best model saved (Acc: {best_acc:.4f})")
-                    wandb.run.summary["best_accuracy"] = best_acc
-        
-        # Save final model
-        torch.save(model.state_dict(), os.path.join(run_dir, 'model_final.pth'))
-        print("Training complete.")
-        
+                    # Save best model
+                    torch.save(model.state_dict(), os.path.join(run_dir, 'best_model.pth'))
+                    print(f"New best model saved with Acc: {best_acc:.4f}")
+
+        # Finish WandB run
         wandb.finish()
+
+    print("Cross-validation completed.")
 
 
 if __name__ == "__main__":

@@ -10,3 +10,5 @@ results/
 pennylane/
 plots/
 wandb/
+.vscode/
+*.zip

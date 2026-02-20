@@ -6,21 +6,39 @@ def np2torch(nparray):
        For array with more than 3 channels, it is better to use an input array in the format BxHxWxC
 
        Args:
-           numpy array (ndarray) BxHxWxC
+           numpy array (ndarray) BxHxWxC or HxWxC
        Returns:
-           torch tensor (tensor) BxCxHxW"""
+           torch tensor (tensor) BxCxHxW or CxHxW"""
 
-    tensor = torch.Tensor(nparray)
+    # Use from_numpy to avoid copy if possible
+    if isinstance(nparray, np.ndarray):
+        tensor = torch.from_numpy(nparray)
+    else:
+        tensor = torch.as_tensor(nparray)
+    
+    # Ensure float
+    if not tensor.is_floating_point():
+        tensor = tensor.float()
 
     if tensor.ndim == 2:
         return tensor
+        
     if tensor.ndim == 3:
-        height, width, channels = tensor.shape
-        if channels <= 3:  # Single image with more channels (HxWxC)
-            return tensor.permute(2, 0, 1)
+        # Check if likely HWC based on channel size
+        # If last dim is 1, 3, or 4, assume HWC
+        d0, d1, d2 = tensor.shape
+        if d2 <= 4 and d0 > 4: 
+             # HWC -> CHW
+             return tensor.permute(2, 0, 1)
+        # Else assume CHW or unknown
+        return tensor
 
     if tensor.ndim == 4:  # More images with more channels (BxHxWxC)
-        return tensor.permute(0, 3, 1, 2)
+        # Check if likely BHWC
+        b, d1, d2, d3 = tensor.shape
+        if d3 <= 4 and d1 > 4:
+            # BHWC -> BCHW
+            return tensor.permute(0, 3, 1, 2)
 
     return tensor
 

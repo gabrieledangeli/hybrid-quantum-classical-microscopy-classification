@@ -9,8 +9,7 @@ import torchvision.transforms as T
 def set_global_seed(seed: int) -> None:
     """Sets the seed for reproducibility across torch, numpy, and random."""
     torch.manual_seed(seed)
-    # Note: 2**32 - 1 is the max seed for numpy
-    np.random.seed(seed % (2**32 - 1))
+    np.random.seed(seed % (2**32 - 1))  # NOTE: 2**32 - 1 is the max seed for numpy
     random.seed(seed)
 
 

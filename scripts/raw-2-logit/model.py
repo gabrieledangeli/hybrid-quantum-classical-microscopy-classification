@@ -5,13 +5,12 @@ from typing import Dict, Any, Optional, List, Tuple
 import torch
 import torch.nn as nn
 import torch.optim
-from torchvision.models import resnet18, resnet34, resnet50, ResNet
+from torchvision.models import resnet18, resnet34, resnet50, ResNet, ResNet18_Weights, ResNet34_Weights, ResNet50_Weights
 import torchvision.utils as vutils
 
 
 def resnet_model(model_name: str = 'resnet18', 
                  pretrained: bool = True, 
-                 in_channels: int = 3, 
                  fc_out_features: int = 2) -> ResNet:
     """
     Factory function to create a ResNet model with a custom fully connected layer.
@@ -19,20 +18,13 @@ def resnet_model(model_name: str = 'resnet18',
     model_name_lower = model_name.lower()
     
     if model_name_lower == 'resnet18':
-        resnet = resnet18(pretrained=pretrained)
+        resnet = resnet18(weights=ResNet18_Weights.DEFAULT if pretrained else None)
     elif model_name_lower == 'resnet34':
-        resnet = resnet34(pretrained=pretrained)
+        resnet = resnet34(weights=ResNet34_Weights.DEFAULT if pretrained else None)
     elif model_name_lower == 'resnet50':
-        resnet = resnet50(pretrained=pretrained)
+        resnet = resnet50(weights=ResNet50_Weights.DEFAULT if pretrained else None)
     else:
         raise ValueError(f"Unknown model name: {model_name}")
-
-    # Modify the input layer if channels != 3 (standard ResNet takes 3)
-    if in_channels != 3:
-        # Note: This is a hacky way to change input channels, usually requires more care
-        # but leaving as is if logic relies on standard ResNet stricture
-        # Actually, standard torchvision resnet has .conv1
-        resnet.conv1 = nn.Conv2d(in_channels, 64, kernel_size=7, stride=2, padding=3, bias=False)
 
     # Modify the final fully connected layer
     resnet.fc = nn.Linear(
@@ -105,15 +97,24 @@ def log_tensor(batch: torch.Tensor, path: str, save_tensors: bool = True, nrow: 
     if save_tensors:
         torch.save(batch, path)
 
-    img_path = path.replace('.pt', '.png')
-    
-    # Simple path manipulation to insert prefix
-    directory, filename = os.path.split(img_path)
-    img_path = os.path.join(directory, f"img_{filename}")
+    # Only save as image if it looks like an image batch (B, C, H, W) or single image (C, H, W)
+    if batch.ndim == 4 or (batch.ndim == 3 and batch.shape[0] in [1, 3, 4]):
+        img_path = path.replace('.pt', '.png')
+        
+        # Simple path manipulation to insert prefix
+        directory, filename = os.path.split(img_path)
+        img_path = os.path.join(directory, f"img_{filename}")
 
-    # Create grid and save
-    grid = vutils.make_grid(batch, nrow=nrow).squeeze()
-    vutils.save_image(grid, img_path)
+        try:
+            # Create grid and save
+            # Normalize to [0, 1] for visualization if needed, but make_grid handles some
+            grid = vutils.make_grid(batch, nrow=nrow, normalize=True).squeeze()
+            vutils.save_image(grid, img_path)
+        except Exception as e:
+            print(f"Warning: Could not save image for {path}: {e}")
+    else:
+        # For logits/labels (2D or 1D), we skip image generation
+        pass
 
 
 def track_images(model: EndToEndModel, 
