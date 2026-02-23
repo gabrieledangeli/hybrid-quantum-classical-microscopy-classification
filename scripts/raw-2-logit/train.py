@@ -3,6 +3,7 @@ import os
 import argparse
 from typing import Tuple, Dict, Any, Optional
 
+from tqdm import tqdm
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -82,7 +83,6 @@ def train_one_epoch(model: nn.Module,
     # Accuracy over the whole epoch
     avg_acc = total_correct / total_samples if total_samples > 0 else 0.0
     
-    print(f"[Train] Epoch {epoch}: Loss {avg_loss:.4f} | Acc {avg_acc:.4f}")
     return avg_loss, avg_acc
 
 
@@ -127,8 +127,6 @@ def validate(model: nn.Module,
             
     avg_loss = running_loss / total_steps
     avg_acc = total_correct / total_samples if total_samples > 0 else 0.0
-    
-    print(f"[Val]   Loss {avg_loss:.4f} | Acc {avg_acc:.4f}")
     
     # Log visuals if possible
     if vis_inputs is not None:
@@ -317,32 +315,34 @@ def run_train(args: argparse.Namespace) -> None:
         # Prepare state dict for saving
         experiment_dir = os.path.join('results', args.dataset, args.processing_mode)
         run_dir = os.path.join(experiment_dir, f"fold_{k_iter}")
-        os.makedirs(run_dir, exist_ok=True)
         
-        state_dict_log = vars(args).copy()
-        state_dict_log.update({
-            'classes': dataset.classes,
-            'device': str(DEVICE),
-            'train_indices': train_indices,
-            'valid_indices': valid_indices,
-            'train_set_size': len(train_indices),
-            'test_set_size': len(valid_indices)
-        })
+        if args.save_model:
+            os.makedirs(run_dir, exist_ok=True)
+            
+            state_dict_log = vars(args).copy()
+            state_dict_log.update({
+                'classes': dataset.classes,
+                'device': str(DEVICE),
+                'train_indices': train_indices,
+                'valid_indices': valid_indices,
+                'train_set_size': len(train_indices),
+                'test_set_size': len(valid_indices)
+            })
 
-        hparams = {
-            'dataset': args.dataset,
-            'processing_mode': args.processing_mode,
-            'lr': args.lr,
-            'batch_size': args.batch_size
-        }
+            hparams = {
+                'dataset': args.dataset,
+                'processing_mode': args.processing_mode,
+                'lr': args.lr,
+                'batch_size': args.batch_size
+            }
 
-        # Save configuration logs
-        with open(os.path.join(run_dir, 'state_dict.txt'), 'w') as f:
-            f.write(f"Command: python {' '.join(sys.argv)}\n")
-            f.write('\n'.join([f'{k}={v}' for k, v in state_dict_log.items()]))
-        
-        with open(os.path.join(run_dir, 'hparams.txt'), 'w') as f:
-             f.write('\n'.join([f'{k}={v}' for k, v in hparams.items()]))
+            # Save configuration logs
+            with open(os.path.join(run_dir, 'state_dict.txt'), 'w') as f:
+                f.write(f"Command: python {' '.join(sys.argv)}\n")
+                f.write('\n'.join([f'{k}={v}' for k, v in state_dict_log.items()]))
+            
+            with open(os.path.join(run_dir, 'hparams.txt'), 'w') as f:
+                f.write('\n'.join([f'{k}={v}' for k, v in hparams.items()]))
 
         train_set = Subset(dataset, indices=train_indices)
         valid_set = Subset(dataset, indices=valid_indices)
@@ -368,11 +368,15 @@ def run_train(args: argparse.Namespace) -> None:
         # Watch model gradients
         wandb.watch(model, log='gradients', log_freq=100)
         
-        for epoch in range(1, args.epochs + 1):
+        epoch_pbar = tqdm(range(1, args.epochs + 1), desc="Training Epochs")
+        for epoch in epoch_pbar:
             train_loss, train_acc = train_one_epoch(model, train_loader, criterion, optimizer, DEVICE, epoch)
             
             if epoch % args.check_val_every_n_epoch == 0:
                 val_loss, val_acc = validate(model, valid_loader, criterion, DEVICE)
+                
+                # Update progress bar description
+                epoch_pbar.set_postfix({'train_loss': f'{train_loss:.4f}', 'val_loss': f'{val_loss:.4f}', 'val_acc': f'{val_acc:.4f}'})
                 
                 # Log Epoch Metrics
                 wandb.log({
@@ -386,8 +390,8 @@ def run_train(args: argparse.Namespace) -> None:
                 if val_acc > best_acc:
                     best_acc = val_acc
                     # Save best model
-                    torch.save(model.state_dict(), os.path.join(run_dir, 'best_model.pth'))
-                    print(f"New best model saved with Acc: {best_acc:.4f}")
+                    if args.save_model:
+                        torch.save(model.state_dict(), os.path.join(run_dir, 'best_model.pth'))
 
         # Finish WandB run
         wandb.finish()

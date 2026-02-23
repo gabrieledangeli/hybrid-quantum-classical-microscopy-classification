@@ -65,6 +65,8 @@ def parse_args() -> argparse.Namespace:
                         help='Number of epochs.')
     parser.add_argument('--check_val_every_n_epoch', type=int, default=1,
                         help='Frequency of validation checks.')
+    parser.add_argument('--save_model', action='store_true',
+                        help='Save the best model checkpoint.')
     
     # Classifier arguments
     parser.add_argument('--classifier_network', type=str, default='resnet18',
