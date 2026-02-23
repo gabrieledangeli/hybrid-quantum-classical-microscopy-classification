@@ -1,14 +1,19 @@
 import sys
 import os
 import argparse
-from typing import Tuple, Dict, Any, Optional
+from typing import Tuple, Dict, Any, Optional, List
 
 from tqdm import tqdm
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
 import torchvision.transforms as T
 from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
+from sklearn.metrics import (
+    f1_score, precision_score, recall_score,
+    balanced_accuracy_score, confusion_matrix,
+)
 
 import wandb
 
@@ -32,131 +37,190 @@ def calculate_accuracy(output: torch.Tensor, target: torch.Tensor) -> Tuple[int,
         return correct, len(target)
 
 
+def compute_metrics(all_preds: np.ndarray, all_labels: np.ndarray,
+                    class_names: Optional[List[str]] = None) -> Dict[str, Any]:
+    """Compute classification metrics suited for imbalanced multiclass problems."""
+    metrics: Dict[str, Any] = {}
+
+    metrics['accuracy'] = (all_preds == all_labels).mean()
+    metrics['balanced_accuracy'] = balanced_accuracy_score(all_labels, all_preds)
+    metrics['macro_f1'] = f1_score(all_labels, all_preds, average='macro', zero_division=0)
+    metrics['weighted_f1'] = f1_score(all_labels, all_preds, average='weighted', zero_division=0)
+    metrics['macro_precision'] = precision_score(all_labels, all_preds, average='macro', zero_division=0)
+    metrics['macro_recall'] = recall_score(all_labels, all_preds, average='macro', zero_division=0)
+
+    # Per-class metrics
+    per_class_p = precision_score(all_labels, all_preds, average=None, zero_division=0)
+    per_class_r = recall_score(all_labels, all_preds, average=None, zero_division=0)
+    per_class_f1 = f1_score(all_labels, all_preds, average=None, zero_division=0)
+
+    labels_present = sorted(set(all_labels) | set(all_preds))
+
+    per_class = []
+    for idx, cls_idx in enumerate(labels_present):
+        name = class_names[cls_idx] if class_names and cls_idx < len(class_names) else str(cls_idx)
+        per_class.append({
+            'class': name,
+            'precision': float(per_class_p[idx]),
+            'recall': float(per_class_r[idx]),
+            'f1': float(per_class_f1[idx]),
+        })
+    metrics['per_class'] = per_class
+
+    # Confusion matrix (raw numpy)
+    metrics['confusion_matrix'] = confusion_matrix(all_labels, all_preds, labels=labels_present)
+    metrics['cm_labels'] = [class_names[i] if class_names and i < len(class_names) else str(i)
+                            for i in labels_present]
+
+    return metrics
+
+
 def train_one_epoch(model: nn.Module,
                     dataloader: DataLoader,
                     criterion: nn.Module,
                     optimizer: optim.Optimizer,
                     device: torch.device,
-                    epoch: int) -> Tuple[float, float]:
-    """Running training for one epoch."""
+                    epoch: int,
+                    class_names: Optional[List[str]] = None) -> Tuple[float, Dict[str, Any]]:
+    """Running training for one epoch. Returns (avg_loss, metrics_dict)."""
     model.train()
     running_loss = 0.0
-    
-    total_correct = 0
-    total_samples = 0
-    
+
+    all_preds = []
+    all_labels = []
+
     total_steps = len(dataloader)
     if total_steps == 0:
         raise RuntimeError("Training dataloader is empty. Check dataset and split configuration.")
-    
+
     for i, (inputs, labels) in enumerate(dataloader):
         inputs = inputs.to(device)
         labels = labels.to(device)
-        
+
         optimizer.zero_grad()
-        
+
         outputs = model(inputs)
         loss = criterion(outputs, labels)
-        
+
         loss.backward()
         optimizer.step()
-        
+
         running_loss += loss.item()
-        
-        # Calculate batch accuracy for logging/accumulation
-        batch_correct, batch_size = calculate_accuracy(outputs, labels)
-        total_correct += batch_correct
-        total_samples += batch_size
-        
-        batch_acc = batch_correct / batch_size
-        
+
+        preds = torch.argmax(outputs, dim=1)
+        all_preds.append(preds.detach().cpu().numpy())
+        all_labels.append(labels.detach().cpu().numpy())
+
         # Log batch metrics
+        batch_correct = preds.eq(labels).sum().item()
         wandb.log({
             "train/batch_loss": loss.item(),
-            "train/batch_acc": batch_acc,
+            "train/batch_acc": batch_correct / len(labels),
             "epoch": epoch
         })
-        
-    # Average loss per batch
+
     avg_loss = running_loss / total_steps
-    
-    # Accuracy over the whole epoch
-    avg_acc = total_correct / total_samples if total_samples > 0 else 0.0
-    
-    return avg_loss, avg_acc
+    metrics = compute_metrics(np.concatenate(all_preds), np.concatenate(all_labels), class_names)
+
+    return avg_loss, metrics
 
 
 def validate(model: nn.Module,
              dataloader: DataLoader,
              criterion: nn.Module,
-             device: torch.device) -> Tuple[float, float]:
-    """Running validation."""
+             device: torch.device,
+             class_names: Optional[List[str]] = None) -> Tuple[float, Dict[str, Any]]:
+    """Running validation. Returns (avg_loss, metrics_dict)."""
     model.eval()
     running_loss = 0.0
-    total_correct = 0
-    total_samples = 0
-    
+
+    all_preds = []
+    all_labels = []
+
     total_steps = len(dataloader)
     if total_steps == 0:
         raise RuntimeError("Validation dataloader is empty. Check dataset and split configuration.")
-    
+
     # For ISP visualization (once per validation)
     vis_inputs = None
     vis_predictions = None
     vis_labels = None
-    
+
     with torch.no_grad():
         for i, (inputs, labels) in enumerate(dataloader):
             inputs = inputs.to(device)
             labels = labels.to(device)
-            
+
             outputs = model(inputs)
             loss = criterion(outputs, labels)
-            
+
             running_loss += loss.item()
-            
-            batch_correct, batch_size = calculate_accuracy(outputs, labels)
-            total_correct += batch_correct
-            total_samples += batch_size
-            
+
+            preds = torch.argmax(outputs, dim=1)
+            all_preds.append(preds.cpu().numpy())
+            all_labels.append(labels.cpu().numpy())
+
             # Save first batch for visualization
             if i == 0:
                 vis_inputs = inputs
                 vis_predictions = outputs
                 vis_labels = labels
-            
+
     avg_loss = running_loss / total_steps
-    avg_acc = total_correct / total_samples if total_samples > 0 else 0.0
-    
-    # Log visuals if possible
+
+    all_preds_np = np.concatenate(all_preds)
+    all_labels_np = np.concatenate(all_labels)
+    metrics = compute_metrics(all_preds_np, all_labels_np, class_names)
+
+    # Log confusion matrix to WandB
+    try:
+        cm_labels = metrics['cm_labels']
+        wandb.log({
+            "val/confusion_matrix": wandb.plot.confusion_matrix(
+                probs=None,
+                y_true=all_labels_np.tolist(),
+                preds=all_preds_np.tolist(),
+                class_names=cm_labels,
+            )
+        }, commit=False)
+    except Exception as e:
+        print(f"[Warning] Could not log confusion matrix to WandB: {e}")
+
+    # Log per-class metrics as WandB table
+    try:
+        table = wandb.Table(columns=["class", "precision", "recall", "f1"])
+        for row in metrics['per_class']:
+            table.add_data(row['class'], row['precision'], row['recall'], row['f1'])
+        wandb.log({"val/per_class_metrics": table}, commit=False)
+    except Exception as e:
+        print(f"[Warning] Could not log per-class table to WandB: {e}")
+
+    # Log processed images if possible
     if vis_inputs is not None:
         try:
-             # If model has a processor, we can visualize the intermediate output
             if model.processor is not None:
                 with torch.no_grad():
                     processed_imgs = model.processor(vis_inputs)
-                
-                # Take first 8 images
+
                 n_vis = min(8, processed_imgs.size(0))
                 images_to_log = []
-                
+
                 for idx in range(n_vis):
                     img = processed_imgs[idx].cpu().detach()
-                    # Denormalize if needed or just clamp for visualization
                     img = torch.clamp(img, 0, 1)
-                    
+
                     pred_cls = torch.argmax(vis_predictions[idx]).item()
                     true_cls = vis_labels[idx].item()
-                    
+
                     images_to_log.append(
                         wandb.Image(img, caption=f"Pred: {pred_cls} | True: {true_cls}")
                     )
-                
+
                 wandb.log({"val/processed_images": images_to_log}, commit=False)
         except Exception as e:
             print(f"[Warning] Could not log images to WandB: {e}")
-            
-    return avg_loss, avg_acc
+
+    return avg_loss, metrics
 
 
 def run_train(args: argparse.Namespace) -> None:
@@ -373,33 +437,48 @@ def run_train(args: argparse.Namespace) -> None:
         )
 
         # 9. Training Loop
-        best_acc = 0.0
+        best_macro_f1 = 0.0
+        class_names = dataset.classes if hasattr(dataset, 'classes') else None
         print("Starting training loop...")
-        
+
         # Watch model gradients
         wandb.watch(model, log='gradients', log_freq=100)
-        
+
         epoch_pbar = tqdm(range(1, args.epochs + 1), desc="Training Epochs")
         for epoch in epoch_pbar:
-            train_loss, train_acc = train_one_epoch(model, train_loader, criterion, optimizer, DEVICE, epoch)
-            
+            train_loss, train_metrics = train_one_epoch(
+                model, train_loader, criterion, optimizer, DEVICE, epoch, class_names
+            )
+
             if epoch % args.check_val_every_n_epoch == 0:
-                val_loss, val_acc = validate(model, valid_loader, criterion, DEVICE)
-                
+                val_loss, val_metrics = validate(
+                    model, valid_loader, criterion, DEVICE, class_names
+                )
+
                 # Update progress bar description
-                epoch_pbar.set_postfix({'train_loss': f'{train_loss:.4f}', 'val_loss': f'{val_loss:.4f}', 'val_acc': f'{val_acc:.4f}'})
-                
+                epoch_pbar.set_postfix({
+                    'loss': f'{val_loss:.4f}',
+                    'mF1': f'{val_metrics["macro_f1"]:.4f}',
+                    'bAcc': f'{val_metrics["balanced_accuracy"]:.4f}',
+                })
+
                 # Log Epoch Metrics
                 wandb.log({
                     "train/loss": train_loss,
-                    "train/acc": train_acc,
+                    "train/acc": train_metrics['accuracy'],
+                    "train/macro_f1": train_metrics['macro_f1'],
                     "val/loss": val_loss,
-                    "val/acc": val_acc,
+                    "val/acc": val_metrics['accuracy'],
+                    "val/balanced_acc": val_metrics['balanced_accuracy'],
+                    "val/macro_f1": val_metrics['macro_f1'],
+                    "val/weighted_f1": val_metrics['weighted_f1'],
+                    "val/macro_precision": val_metrics['macro_precision'],
+                    "val/macro_recall": val_metrics['macro_recall'],
                     "epoch": epoch
                 })
 
-                if val_acc > best_acc:
-                    best_acc = val_acc
+                if val_metrics['macro_f1'] > best_macro_f1:
+                    best_macro_f1 = val_metrics['macro_f1']
                     # Save best model
                     if args.save_model:
                         torch.save(model.state_dict(), os.path.join(run_dir, 'best_model.pth'))
