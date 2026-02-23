@@ -279,7 +279,6 @@ def run_train(args: argparse.Namespace) -> None:
             classifier=classifier,
             processor=processor,
             augmentation=augmentation,
-            is_segmentation_task=(dataset.task == 'segmentation'),
             freeze_classifier=args.freeze_classifier,
             freeze_processor=args.freeze_processor,
         )

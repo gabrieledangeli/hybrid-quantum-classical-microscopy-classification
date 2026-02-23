@@ -73,7 +73,6 @@ class EndToEndModel(nn.Module):
                  classifier: nn.Module,
                  processor: Optional[nn.Module] = None,
                  augmentation: Optional[nn.Module] = None,
-                 is_segmentation_task: bool = False,
                  augmentation_on_eval: bool = False,
                  freeze_classifier: bool = False,
                  freeze_processor: bool = False):
@@ -82,10 +81,9 @@ class EndToEndModel(nn.Module):
         self.classifier = classifier
         self.processor = processor
         self.augmentation = augmentation
-        
-        self.is_segmentation_task = is_segmentation_task
+
         self.augmentation_on_eval = augmentation_on_eval
-        
+
         self.freeze_classifier = freeze_classifier
         self.freeze_processor = freeze_processor
 
@@ -103,18 +101,12 @@ class EndToEndModel(nn.Module):
         # 1. Image Processing (Raw -> RGB)
         if self.processor is not None:
             x = self.processor(x)
-        
+
         # 2. Augmentation (Training only, unless specified)
         apply_augmentation = self.training or self.augmentation_on_eval
         if self.augmentation is not None and apply_augmentation:
-            # Note: The augmentation module is expected to handle 'retain_state' 
-            # if it's a custom one from augmentation.py
-            if self.is_segmentation_task:
-                 # Assuming custom augmentation supports this arg
-                x = self.augmentation(x, retain_state=True)
-            else:
-                x = self.augmentation(x)
-            
+            x = self.augmentation(x)
+
         # 3. Classification
         x = self.classifier(x)
         return x

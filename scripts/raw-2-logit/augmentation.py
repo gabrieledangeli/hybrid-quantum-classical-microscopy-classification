@@ -42,47 +42,17 @@ class RandomRotate90(object):
 
 class ComposeState(T.Compose):
     """
-    Composes several transforms together, with state retention support.
-    Useful for segmentation where mask and image need identical transforms.
+    Composes several transforms together.
+    Accepts tuples (transform, flag) for compatibility; the flag is ignored
+    (it was used for segmentation mask filtering in a previous codebase).
     """
     def __init__(self, transforms: List[Union[Any, Tuple[Any, bool]]]):
-        self.transforms = []
-        self.mask_transforms = []
-        
+        parsed = []
         for t in transforms:
-            apply_for_mask = True
             if isinstance(t, tuple):
-                t, apply_for_mask = t
-            self.transforms.append(t)
-            if apply_for_mask:
-                self.mask_transforms.append(t)
-                
-        self.seed: Optional[Any] = None
-
-    def __call__(self, x: Any, retain_state: bool = False, mask_transform: bool = False) -> Any: # type: ignore
-        """
-        Args:
-            retain_state (bool): If True, re-uses the random seed.
-            mask_transform (bool): If True, applies only transforms suitable for masks.
-        """
-        if self.seed is not None:
-            # Restore previous state
-            set_global_seed(self.seed)
-            
-        if retain_state:
-            # Generate and save a new seed, or keep existing
-            self.seed = self.seed or torch.seed()
-            set_global_seed(self.seed)
-        else:
-            # Reset state
-            self.seed = None
-
-        transforms = self.transforms if not mask_transform else self.mask_transforms
-        
-        for t in transforms:
-            x = t(x)
-            
-        return x
+                t, _ = t
+            parsed.append(t)
+        super().__init__(parsed)
 
 
 # Define Augmentation Pipelines

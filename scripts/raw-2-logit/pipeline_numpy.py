@@ -318,8 +318,8 @@ def get_statistics(dataset, train_indices, transform=None):
     images, labels = next(dataiter)
 
     if len(images.shape) == 3:
-        mean, std = torch.mean(images, axis=(0, 1, 2)), torch.std(images, axis=(0, 1, 2))
+        mean, std = torch.mean(images, dim=(0, 1, 2)), torch.std(images, dim=(0, 1, 2))
         return mean, std
     else:
-        mean, std = torch.mean(images, axis=(0, 2, 3))[:, None, None], torch.std(images, axis=(0, 2, 3))[:, None, None]
+        mean, std = torch.mean(images, dim=(0, 2, 3))[:, None, None], torch.std(images, dim=(0, 2, 3))[:, None, None]
         return mean, std

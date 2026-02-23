@@ -250,7 +250,14 @@ class PennyLaneQuantumLayer(nn.Module):
         self.n_qubits = n_qubits
         self.n_layers = n_layers
 
-        import pennylane as qml
+        try:
+            import pennylane as qml
+        except ImportError:
+            raise ImportError(
+                "PennyLane is required for the quantum layer but is not installed. "
+                "Install it with: pip install pennylane\n"
+                "Or use --no_pennylane to fall back to a classical MLP substitute."
+            )
 
         dev = qml.device("default.qubit", wires=n_qubits)
 
