@@ -8,9 +8,11 @@ import torch.optim
 from torchvision.models import resnet18, resnet34, resnet50, ResNet, ResNet18_Weights, ResNet34_Weights, ResNet50_Weights
 import torchvision.utils as vutils
 
+from hybrid_model import HybridMPSClassifier
 
-def resnet_model(model_name: str = 'resnet18', 
-                 pretrained: bool = True, 
+
+def resnet_model(model_name: str = 'resnet18',
+                 pretrained: bool = True,
                  fc_out_features: int = 2) -> ResNet:
     """
     Factory function to create a ResNet model with a custom fully connected layer.
@@ -34,6 +36,32 @@ def resnet_model(model_name: str = 'resnet18',
     )
     
     return resnet
+
+
+def hybrid_mps_vqc_model(
+    fc_out_features: int,
+    n_qubits: int = 8,
+    mps_bond_dim: int = 64,
+    mps_phys_dim: int = 2,
+    mps_hidden_dim: int = 128,
+    vqc_layers: int = 2,
+    freeze_resnet: bool = True,
+    use_pennylane: bool = True,
+) -> HybridMPSClassifier:
+    """
+    Factory function to create a Hybrid MPS + VQC classifier.
+    ResNet18 -> MPS Bridge -> VQC -> BN -> Linear.
+    """
+    return HybridMPSClassifier(
+        n_classes=fc_out_features,
+        n_qubits=n_qubits,
+        mps_bond_dim=mps_bond_dim,
+        mps_phys_dim=mps_phys_dim,
+        bridge_hidden_dim=mps_hidden_dim,
+        vqc_layers=vqc_layers,
+        freeze_resnet=freeze_resnet,
+        use_pennylane=use_pennylane,
+    )
 
 
 class EndToEndModel(nn.Module):

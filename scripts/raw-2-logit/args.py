@@ -70,10 +70,28 @@ def parse_args() -> argparse.Namespace:
     
     # Classifier arguments
     parser.add_argument('--classifier_network', type=str, default='resnet18',
-                        choices=['resnet18', 'resnet34', 'resnet50'],
+                        choices=['resnet18', 'resnet34', 'resnet50', 'hybrid_mps_vqc'],
                         help='Type of pretrained network.')
     parser.add_argument('--classifier_pretrained', action='store_true',
                         help='Whether to use a pre-trained model or not.')
+
+    # Hybrid MPS + VQC arguments (used when --classifier_network hybrid_mps_vqc)
+    parser.add_argument('--n_qubits', type=int, default=8,
+                        help='Number of qubits / MPS sites.')
+    parser.add_argument('--mps_bond_dim', type=int, default=64,
+                        help='Bond dimension for MPS tensor network.')
+    parser.add_argument('--mps_phys_dim', type=int, default=2,
+                        help='Physical dimension per MPS site (2 = qubits).')
+    parser.add_argument('--mps_hidden_dim', type=int, default=128,
+                        help='Hidden dimension in per-site MPS encoders.')
+    parser.add_argument('--vqc_layers', type=int, default=2,
+                        help='Number of parametrized layers in the variational quantum circuit.')
+    parser.add_argument('--use_pennylane', action='store_true', default=True,
+                        help='Use PennyLane quantum simulation (default). Disable with --no_pennylane.')
+    parser.add_argument('--no_pennylane', dest='use_pennylane', action='store_false',
+                        help='Use classical MLP fallback instead of PennyLane VQC.')
+    parser.add_argument('--freeze_resnet_backbone', action='store_true',
+                        help='Freeze ResNet18 backbone inside the hybrid MPS+VQC classifier.')
     
     # Adversarial arguments
     parser.add_argument('--adv_parameters',

@@ -12,3 +12,4 @@ plots/
 wandb/
 .vscode/
 *.zip
+tmpclaude*

@@ -19,7 +19,7 @@ from augmentation import get_augmentation, set_global_seed
 from dataset import Subset, get_dataset
 from pipeline_numpy import RawProcessingPipeline
 from pipeline_torch import RawToRGB, ParametrizedProcessing, NNProcessing
-from model import resnet_model, EndToEndModel
+from model import resnet_model, hybrid_mps_vqc_model, EndToEndModel
 
 # Global Constants
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -247,11 +247,23 @@ def run_train(args: argparse.Namespace) -> None:
                 )
 
         # 5. Initialize Classifier
-        classifier = resnet_model(
-            model_name=args.classifier_network,
-            pretrained=args.classifier_pretrained,
-            fc_out_features=len(dataset.classes)
-        )
+        if args.classifier_network == 'hybrid_mps_vqc':
+            classifier = hybrid_mps_vqc_model(
+                fc_out_features=len(dataset.classes),
+                n_qubits=args.n_qubits,
+                mps_bond_dim=args.mps_bond_dim,
+                mps_phys_dim=args.mps_phys_dim,
+                mps_hidden_dim=args.mps_hidden_dim,
+                vqc_layers=args.vqc_layers,
+                freeze_resnet=args.freeze_resnet_backbone,
+                use_pennylane=args.use_pennylane,
+            )
+        else:
+            classifier = resnet_model(
+                model_name=args.classifier_network,
+                pretrained=args.classifier_pretrained,
+                fc_out_features=len(dataset.classes)
+            )
 
         if processor and args.freeze_processor:
              # Check if processor has parameters
