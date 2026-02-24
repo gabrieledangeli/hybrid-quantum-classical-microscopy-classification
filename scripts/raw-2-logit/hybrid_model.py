@@ -327,7 +327,7 @@ class HybridMPSClassifier(nn.Module):
         mps_phys_dim: int = 2,
         bridge_hidden_dim: int = 128,
         vqc_layers: int = 2,
-        freeze_resnet: bool = True,
+        freeze_resnet: bool = False,
         use_pennylane: bool = True,
     ):
         super().__init__()
