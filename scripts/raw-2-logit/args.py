@@ -14,7 +14,7 @@ def parse_args() -> argparse.Namespace:
                         help='Dataset to use for training and evaluation.')
     parser.add_argument('--data_dir', type=str, default='./data',
                         help='Path to dataset root directory')
-    parser.add_argument('--num_workers', type=int, default=8,
+    parser.add_argument('--num_workers', type=int, default=4,
                         help='Number of data loading workers')
     
     # Cross-validation arguments

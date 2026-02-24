@@ -46,6 +46,7 @@ class ImageFolderDataset(Dataset):
         self.labels = labels
         self.transform = transform
         self.bits = bits
+        self._cache: dict = {}  # lazy in-memory cache for loaded images
 
         self.images = list_images_in_dir(img_dir)
 
@@ -70,11 +71,13 @@ class ImageFolderDataset(Dataset):
     def __getitem__(self, idx: int) -> Tuple[torch.Tensor, Any]:
         label = self.labels[idx]
 
-        # Load image (returns numpy array)
-        img = load_image(self.images[idx])
-        
-        # Normalize to [0, 1] range based on bit depth
-        img = img / (2**self.bits - 1)
+        # Use in-memory cache to avoid repeated TIFF disk reads
+        if idx in self._cache:
+            img = self._cache[idx]
+        else:
+            img = load_image(self.images[idx])
+            img = img / (2**self.bits - 1)
+            self._cache[idx] = img
         
         if self.transform is not None:
             img = self.transform(img)
@@ -151,6 +154,7 @@ class MicroscopyDataset(ImageFolderDataset):
             raise ValueError(f"Invalid intensity_ratio: {intensity_ratio}, only 1.0 is currently supported for Raw.")
 
         self.root_dir = root_dir
+        self._cache: dict = {}  # lazy in-memory cache for loaded images
         self.img_dir = os.path.join(root_dir, 'images', f'raw_scale{int(intensity_ratio * 100):03d}')
 
         if not os.path.exists(self.img_dir):

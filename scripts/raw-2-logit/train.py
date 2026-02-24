@@ -29,6 +29,8 @@ from model import resnet_model, hybrid_mps_vqc_model, EndToEndModel
 
 # Global Constants
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+if torch.cuda.is_available():
+    torch.backends.cudnn.benchmark = True
 
 def calculate_accuracy(output: torch.Tensor, target: torch.Tensor) -> Tuple[int, int]:
     """Computes the number of correct predictions and total samples."""
@@ -112,13 +114,14 @@ def train_one_epoch(model: nn.Module,
         all_preds.append(preds.detach().cpu().numpy())
         all_labels.append(labels.detach().cpu().numpy())
 
-        # Log batch metrics
-        batch_correct = preds.eq(labels).sum().item()
-        wandb.log({
-            "train/batch_loss": loss.item(),
-            "train/batch_acc": batch_correct / len(labels),
-            "epoch": epoch
-        })
+        # Log batch metrics (every 5 batches to reduce overhead)
+        if i % 5 == 0:
+            batch_correct = preds.eq(labels).sum().item()
+            wandb.log({
+                "train/batch_loss": loss.item(),
+                "train/batch_acc": batch_correct / len(labels),
+                "epoch": epoch
+            })
 
     avg_loss = running_loss / total_steps
     metrics = compute_metrics(np.concatenate(all_preds), np.concatenate(all_labels), class_names)
@@ -434,13 +437,17 @@ def run_train(args: argparse.Namespace) -> None:
         if sampler is not None:
             shuffle = False
             
+        # num_workers=0 avoids multiprocessing spawn overhead;
+        # images are cached in-memory after first epoch so disk I/O is not a factor.
         train_loader = DataLoader(
             train_set, batch_size=args.batch_size, 
-            num_workers=args.num_workers, sampler=sampler, shuffle=shuffle
+            num_workers=0, sampler=sampler, shuffle=shuffle,
+            pin_memory=(DEVICE.type == 'cuda'),
         )
         valid_loader = DataLoader(
             valid_set, batch_size=args.batch_size, 
-            num_workers=args.num_workers, shuffle=False
+            num_workers=0, shuffle=False,
+            pin_memory=(DEVICE.type == 'cuda'),
         )
 
         # 9. Training Loop

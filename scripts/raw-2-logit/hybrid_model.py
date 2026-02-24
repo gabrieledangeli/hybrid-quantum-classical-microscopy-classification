@@ -259,9 +259,28 @@ class PennyLaneQuantumLayer(nn.Module):
                 "Or use --no_pennylane to fall back to a classical MLP substitute."
             )
 
-        dev = qml.device("default.qubit", wires=n_qubits)
+        # Try fast backends in order: lightning.gpu > lightning.qubit > default.qubit
+        dev = None
+        diff_method = None
+        for backend, dm in [
+            ("lightning.gpu", "adjoint"),
+            ("lightning.qubit", "adjoint"),
+        ]:
+            try:
+                dev = qml.device(backend, wires=n_qubits)
+                diff_method = dm
+                print(f"[Quantum] Using {backend} with {dm} differentiation.")
+                break
+            except Exception:
+                continue
 
-        @qml.qnode(dev, interface="torch", diff_method="backprop")
+        if dev is None:
+            dev = qml.device("default.qubit", wires=n_qubits)
+            diff_method = "backprop"
+            print(f"[Quantum] Falling back to default.qubit with backprop (slow). "
+                  f"Install pennylane-lightning for 5-20x speedup: pip install pennylane-lightning")
+
+        @qml.qnode(dev, interface="torch", diff_method=diff_method)
         def circuit(inputs, weights):
             for i in range(n_qubits):
                 qml.RX(inputs[..., i], wires=i)
