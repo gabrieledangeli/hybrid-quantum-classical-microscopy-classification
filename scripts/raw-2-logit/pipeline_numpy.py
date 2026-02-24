@@ -101,6 +101,15 @@ def processing(img, black_level, white_balance, colour_matrix, debayer="bilinear
     # Colour Correction
     img = colour_correction(img, colour_matrix)
 
+    # Dynamic range normalization after WB + CC
+    # The combined WB/CC amplifies values up to ~2x (row sums: R≈3, G≈5, B≈10.5),
+    # causing ~30% pixel saturation after clipping. Normalizing by the 99th percentile
+    # maps the bulk of pixel values into [0, 1] while preserving relative information.
+    p99 = np.percentile(img, 99)
+    if p99 > 1.0:
+        img = img / p99
+    img = np.clip(img, 0, 1)
+
     # Sharpening
     if sharpening == "sharpening_filter":  # Fixed sharpening
         img = sharpening_filter(img)

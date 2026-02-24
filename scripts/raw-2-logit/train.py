@@ -5,6 +5,7 @@ from typing import Tuple, Dict, Any, Optional, List
 
 from tqdm import tqdm
 import numpy as np
+from datetime import datetime
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -248,7 +249,13 @@ def run_train(args: argparse.Namespace) -> None:
         wandb.init(
             project=args.wandb_project,
             entity=args.wandb_entity,
-            name=args.run_name or f"{args.dataset}_{args.processing_mode}_fold_{k_iter}",
+            name=args.run_name or (
+                f"{datetime.now():%d-%m}"
+                f"_{args.classifier_network}"
+                f"_aug-{args.augmentation}"
+                f"_bal-{args.imbalance_handling}"
+                f"_fold{k_iter + 1}of{args.n_splits}"
+            ),
             config=config
         )
         
@@ -273,9 +280,9 @@ def run_train(args: argparse.Namespace) -> None:
                  print(f"Warning: Processing mode '{args.processing_mode}' ignored for RGB dataset.")
 
         elif args.processing_mode == 'static':
-            # Mean and Std for normalization
-            mean = torch.tensor([0.91, 0.84, 0.94])
-            std = torch.tensor([0.08, 0.12, 0.05])
+            # Mean and Std for normalization (from dataset class attributes)
+            mean = torch.tensor(dataset.dataset_mean)
+            std = torch.tensor(dataset.dataset_std)
             
             # Static pipeline using CPU-based transforms (Numpy)
             dataset.transform = T.Compose([

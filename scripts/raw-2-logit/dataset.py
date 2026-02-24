@@ -138,8 +138,8 @@ class MicroscopyDataset(ImageFolderDataset):
 
     camera_parameters = (black_level, white_balance, colour_matrix)
 
-    dataset_mean = [0.91, 0.84, 0.94]
-    dataset_std = [0.08, 0.12, 0.05]
+    dataset_mean = [0.91, 0.83, 0.94]
+    dataset_std = [0.08, 0.13, 0.05]
 
     def __init__(self, 
                  root_dir: str, 
