@@ -29,23 +29,29 @@ def k_fold(dataset, n_splits: int, seed: int, train_size: float = 0.8, strategy:
        Returns:
            idxs (list): indeces for splitting the dataset. The list contain n_split pair of train/test indeces.
     """
-    x = dataset.images
-    y = dataset.labels
-    
     # Ensure y is a numpy array for sklearn
-    y = np.array(y)
+    y = np.array(dataset.labels)
 
+    if strategy not in ('kfold', 'shuffle_split'):
+        raise ValueError(
+            f"Unknown CV strategy: '{strategy}'. Must be 'kfold' or 'shuffle_split'."
+        )
+
+    if strategy == 'kfold' and n_splits < 2:
+        raise ValueError(
+            f"StratifiedKFold requires n_splits >= 2, got {n_splits}. "
+            f"Use --cv_strategy shuffle_split for a single train/test split."
+        )
+
+    # --- Build splits ---
     idxs = []
 
     if strategy == 'shuffle_split':
         cv = StratifiedShuffleSplit(n_splits=n_splits, train_size=train_size, random_state=seed)
-    elif strategy == 'kfold':
+    else:  # 'kfold'
         cv = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=seed)
-    else:
-        raise ValueError(f"Unknown CV strategy: {strategy}")
 
     # Use a dummy X because we only need indices based on y
-    # X needs to have same length as y
     dummy_x = np.zeros(len(y))
 
     for idxs_train, idxs_test in cv.split(dummy_x, y):
