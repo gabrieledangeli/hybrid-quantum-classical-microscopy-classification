@@ -1,5 +1,6 @@
 import os
 from typing import List, Tuple, Optional, Callable, Union, Any
+from collections import Counter
 
 from torch.utils.data import Dataset
 import torch
@@ -14,12 +15,29 @@ VALID_CLASSES = [
     'MON', 'MYB', 'MYO', 'NGB', 'NGS', 'PMB', 'PMO', 'UNC'
 ]
 
-def get_dataset(name: str, root_dir: str, intensity_ratio: float = 1.0) -> Dataset:
+def get_dataset(name: str,
+                root_dir: str,
+                intensity_ratio: float = 1.0,
+                min_samples_per_class: int = 5,
+                below_threshold_strategy: str = 'drop',
+                rare_class_name: str = 'RARE') -> Dataset:
     """Factory function to get the dataset instance."""
     if name == 'Microscopy':
-        return MicroscopyDataset(root_dir=root_dir, intensity_ratio=intensity_ratio)
+        return MicroscopyDataset(
+            root_dir=root_dir,
+            intensity_ratio=intensity_ratio,
+            min_samples_per_class=min_samples_per_class,
+            below_threshold_strategy=below_threshold_strategy,
+            rare_class_name=rare_class_name,
+        )
     elif name == 'MicroscopyRGB':
-        return MicroscopyDatasetRGB(root_dir=root_dir, intensity_ratio=intensity_ratio)
+        return MicroscopyDatasetRGB(
+            root_dir=root_dir,
+            intensity_ratio=intensity_ratio,
+            min_samples_per_class=min_samples_per_class,
+            below_threshold_strategy=below_threshold_strategy,
+            rare_class_name=rare_class_name,
+        )
     else:
         raise ValueError(f"Unknown dataset name: {name}")
 
@@ -148,14 +166,27 @@ class MicroscopyDataset(ImageFolderDataset):
                  root_dir: str, 
                  intensity_ratio: float = 1.0, 
                  transform: Optional[Callable] = None, 
-                 bits: int = 16):
+                 bits: int = 16,
+                 min_samples_per_class: int = 5,
+                 below_threshold_strategy: str = 'drop',
+                 rare_class_name: str = 'RARE'):
 
         if intensity_ratio != 1.0:
             raise ValueError(f"Invalid intensity_ratio: {intensity_ratio}, only 1.0 is currently supported for Raw.")
+        if min_samples_per_class < 1:
+            raise ValueError(f"min_samples_per_class must be >= 1, got {min_samples_per_class}")
+        if below_threshold_strategy not in ('drop', 'merge_to_rare'):
+            raise ValueError(
+                f"Unknown below_threshold_strategy: {below_threshold_strategy}. "
+                f"Expected 'drop' or 'merge_to_rare'."
+            )
 
         self.root_dir = root_dir
         self._cache: dict = {}  # lazy in-memory cache for loaded images
         self.img_dir = os.path.join(root_dir, 'images', f'raw_scale{int(intensity_ratio * 100):03d}')
+        self.min_samples_per_class = min_samples_per_class
+        self.below_threshold_strategy = below_threshold_strategy
+        self.rare_class_name = rare_class_name
 
         if not os.path.exists(self.img_dir):
             raise FileNotFoundError(f"Image directory not found at: {self.img_dir}")
@@ -171,17 +202,39 @@ class MicroscopyDataset(ImageFolderDataset):
         # Read manifest
         images_filenames, class_labels_raw = self._read_label_file(label_file)
 
-        # Filter classes with low appearance (>4 samples)
+        # Keep only configured classes present in labels.
+        label_counts = Counter(class_labels_raw)
         self.valid_classes_list = [
-            cls for cls in self.valid_classes_list 
-            if class_labels_raw.count(cls) > 4
+            cls for cls in self.valid_classes_list
+            if label_counts.get(cls, 0) > 0
         ]
+        class_counts_raw = {cls: int(label_counts.get(cls, 0)) for cls in self.valid_classes_list}
+        eligible_classes = [cls for cls in self.valid_classes_list if class_counts_raw[cls] >= min_samples_per_class]
+        low_count_classes = [cls for cls in self.valid_classes_list if class_counts_raw[cls] < min_samples_per_class]
+
+        class_mapping = {}
+        if below_threshold_strategy == 'merge_to_rare':
+            for cls in eligible_classes:
+                class_mapping[cls] = cls
+            for cls in low_count_classes:
+                class_mapping[cls] = rare_class_name
+            selected_classes = set(eligible_classes + low_count_classes)
+        else:
+            for cls in eligible_classes:
+                class_mapping[cls] = cls
+            selected_classes = set(eligible_classes)
+
+        # Metadata for reporting/debugging.
+        self.class_counts_raw = class_counts_raw
+        self.dropped_classes = sorted([cls for cls in low_count_classes if cls not in selected_classes])
+        self.merged_classes = sorted(low_count_classes) if below_threshold_strategy == 'merge_to_rare' else []
+        self.original_to_mapped_class = dict(class_mapping)
 
         # Filter invalid files and classes
         filtered_data = [
-            (img, cls) 
+            (img, class_mapping[cls])
             for img, cls in zip(images_filenames, class_labels_raw)
-            if cls in self.valid_classes_list and img not in self.invalid_files
+            if cls in selected_classes and img not in self.invalid_files
         ]
         
         if not filtered_data:
@@ -191,6 +244,13 @@ class MicroscopyDataset(ImageFolderDataset):
 
         # Create class index mapping
         self.classes = sorted(list(set(final_labels)))
+        if rare_class_name in self.classes:
+            self.classes = [cls for cls in self.classes if cls != rare_class_name] + [rare_class_name]
+        if len(self.classes) < 2:
+            raise RuntimeError(
+                f"Need at least 2 classes for classification after filtering. Got classes={self.classes}. "
+                f"Try lowering --min_samples_per_class or using --below_threshold_strategy merge_to_rare."
+            )
         
         # Store full paths
         self.images = [os.path.join(self.img_dir, img) for img in final_images]
@@ -225,20 +285,27 @@ class MicroscopyDatasetRGB(MicroscopyDataset):
     MicroscopyDataset for RGB images.
     """
     camera_parameters = None
-    dataset_mean = None
-    dataset_std = None
+    # Dataset-specific normalization statistics computed on the filtered RGB split.
+    dataset_mean = [0.5566, 0.4607, 0.5923]
+    dataset_std = [0.0983, 0.1417, 0.0667]
 
     def __init__(self, 
                  root_dir: str, 
                  intensity_ratio: float = 1.0, 
                  transform: Optional[Callable] = None, 
-                 bits: int = 16):
+                 bits: int = 16,
+                 min_samples_per_class: int = 5,
+                 below_threshold_strategy: str = 'drop',
+                 rare_class_name: str = 'RARE'):
         
         super().__init__(
             root_dir=root_dir, 
             intensity_ratio=intensity_ratio, 
             transform=transform, 
-            bits=bits
+            bits=bits,
+            min_samples_per_class=min_samples_per_class,
+            below_threshold_strategy=below_threshold_strategy,
+            rare_class_name=rare_class_name,
         )
         # Modify paths to point to RGB images instead of RAW
         self.images = [image.replace('raw', 'rgb') for image in self.images]

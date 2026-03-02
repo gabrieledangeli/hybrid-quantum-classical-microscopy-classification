@@ -155,12 +155,14 @@ def get_camera_parameters(rawpyImg):
 
 
 def remove_blacklv(rawImg, black_level):
-    rawImg[0::2, 0::2] -= black_level[0]  # R
-    rawImg[0::2, 1::2] -= black_level[1]  # G
-    rawImg[1::2, 0::2] -= black_level[2]  # G
-    rawImg[1::2, 1::2] -= black_level[3]  # B
+    # Avoid mutating cached dataset arrays in place.
+    img = rawImg.copy()
+    img[0::2, 0::2] -= black_level[0]  # R
+    img[0::2, 1::2] -= black_level[1]  # G
+    img[1::2, 0::2] -= black_level[2]  # G
+    img[1::2, 1::2] -= black_level[3]  # B
 
-    return rawImg
+    return img
 
 
 def wb_correction(img, white_balance):

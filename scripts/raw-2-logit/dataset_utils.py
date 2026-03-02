@@ -1,4 +1,5 @@
 import os
+from collections import Counter
 
 import numpy as np
 
@@ -42,6 +43,32 @@ def k_fold(dataset, n_splits: int, seed: int, train_size: float = 0.8, strategy:
             f"StratifiedKFold requires n_splits >= 2, got {n_splits}. "
             f"Use --cv_strategy shuffle_split for a single train/test split."
         )
+
+    class_counts = Counter(y.tolist())
+    min_class_count = min(class_counts.values()) if class_counts else 0
+
+    if strategy == 'kfold':
+        if n_splits > min_class_count:
+            raise ValueError(
+                f"n_splits={n_splits} is too high for StratifiedKFold: minimum class count is {min_class_count}. "
+                f"Use n_splits <= {min_class_count}, lower --min_samples_per_class, or merge/drop rare classes."
+            )
+    else:
+        if not (0.0 < train_size < 1.0):
+            raise ValueError(f"train_size must be in (0, 1), got {train_size}")
+        for cls_idx, cls_count in class_counts.items():
+            if cls_count < 2:
+                raise ValueError(
+                    f"Class {cls_idx} has only {cls_count} sample(s). StratifiedShuffleSplit requires at least 2."
+                )
+            cls_train = int(np.floor(cls_count * train_size))
+            cls_val = cls_count - cls_train
+            if cls_train < 1 or cls_val < 1:
+                raise ValueError(
+                    f"Class {cls_idx} cannot be split with train_size={train_size}: "
+                    f"train={cls_train}, val={cls_val}, total={cls_count}. "
+                    f"Adjust train_size or dataset class filtering."
+                )
 
     # --- Build splits ---
     idxs = []

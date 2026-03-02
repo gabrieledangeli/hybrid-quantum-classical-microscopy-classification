@@ -1,6 +1,6 @@
 import os
 from collections import defaultdict
-from typing import Dict, Any, Optional, List, Tuple
+from typing import Dict, Any, Optional, List, Tuple, Set
 
 import torch
 import torch.nn as nn
@@ -72,7 +72,10 @@ class EndToEndModel(nn.Module):
     def __init__(self,
                  classifier: nn.Module,
                  processor: Optional[nn.Module] = None,
+                 normalization: Optional[nn.Module] = None,
                  augmentation: Optional[nn.Module] = None,
+                 augmentation_target_classes: Optional[List[int]] = None,
+                 non_target_augmentation_prob: float = 1.0,
                  augmentation_on_eval: bool = False,
                  freeze_classifier: bool = False,
                  freeze_processor: bool = False):
@@ -80,7 +83,12 @@ class EndToEndModel(nn.Module):
 
         self.classifier = classifier
         self.processor = processor
+        self.normalization = normalization
         self.augmentation = augmentation
+        self.augmentation_target_classes: Optional[Set[int]] = (
+            set(augmentation_target_classes) if augmentation_target_classes is not None else None
+        )
+        self.non_target_augmentation_prob = float(non_target_augmentation_prob)
 
         self.augmentation_on_eval = augmentation_on_eval
 
@@ -97,7 +105,29 @@ class EndToEndModel(nn.Module):
         for param in module.parameters():
             param.requires_grad = False
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def _apply_conditional_augmentation(self, x: torch.Tensor, labels: Optional[torch.Tensor]) -> torch.Tensor:
+        if self.augmentation is None:
+            return x
+        if self.augmentation_target_classes is None or labels is None:
+            return self.augmentation(x)
+        if x.ndim != 4:
+            return self.augmentation(x)
+
+        label_list = labels.detach().cpu().tolist()
+        augmented = []
+        for i, sample in enumerate(x):
+            label = int(label_list[i])
+            should_augment = label in self.augmentation_target_classes
+            if not should_augment and self.non_target_augmentation_prob > 0.0:
+                should_augment = bool(torch.rand(1, device=sample.device).item() < self.non_target_augmentation_prob)
+
+            if should_augment:
+                sample = self.augmentation(sample)
+            augmented.append(sample)
+
+        return torch.stack(augmented, dim=0)
+
+    def forward(self, x: torch.Tensor, labels: Optional[torch.Tensor] = None) -> torch.Tensor:
         # 1. Image Processing (Raw -> RGB)
         if self.processor is not None:
             x = self.processor(x)
@@ -105,11 +135,33 @@ class EndToEndModel(nn.Module):
         # 2. Augmentation (Training only, unless specified)
         apply_augmentation = self.training or self.augmentation_on_eval
         if self.augmentation is not None and apply_augmentation:
-            x = self.augmentation(x)
+            x = self._apply_conditional_augmentation(x, labels)
 
-        # 3. Classification
+        # 3. Normalization (after augmentation to keep transform domain consistent)
+        if self.normalization is not None:
+            x = self.normalization(x)
+
+        # 4. Classification
         x = self.classifier(x)
         return x
+
+
+class TensorNormalize(nn.Module):
+    """Channel-wise normalization module for tensors of shape (B, C, H, W) or (C, H, W)."""
+
+    def __init__(self, mean: List[float], std: List[float], eps: float = 1e-6):
+        super().__init__()
+        mean_tensor = torch.as_tensor(mean, dtype=torch.float32).view(1, -1, 1, 1)
+        std_tensor = torch.as_tensor(std, dtype=torch.float32).view(1, -1, 1, 1)
+        self.register_buffer("mean", mean_tensor)
+        self.register_buffer("std", torch.clamp(std_tensor, min=eps))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if x.ndim == 3:
+            return (x - self.mean.squeeze(0)) / self.std.squeeze(0)
+        if x.ndim == 4:
+            return (x - self.mean) / self.std
+        raise ValueError(f"TensorNormalize expects 3D or 4D tensor, got shape {tuple(x.shape)}")
 
 
 def log_tensor(batch: torch.Tensor, path: str, save_tensors: bool = True, nrow: int = 8) -> None:

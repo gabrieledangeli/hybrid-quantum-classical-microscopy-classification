@@ -16,11 +16,18 @@ def parse_args() -> argparse.Namespace:
                         help='Path to dataset root directory')
     parser.add_argument('--num_workers', type=int, default=4,
                         help='Number of data loading workers')
+    parser.add_argument('--min_samples_per_class', type=int, default=5,
+                        help='Minimum number of samples required per class before rebalancing strategy is applied.')
+    parser.add_argument('--below_threshold_strategy', type=str, default='drop',
+                        choices=['drop', 'merge_to_rare'],
+                        help='How to handle classes below min_samples_per_class.')
+    parser.add_argument('--rare_class_name', type=str, default='RARE',
+                        help='Name of the merged class when below_threshold_strategy=merge_to_rare.')
     
     # Cross-validation arguments
     parser.add_argument('--n_splits', type=int, default=1,
                         help='Number of splits (folds) used for cross-validation.')
-    parser.add_argument('--cv_strategy', type=str, default='kfold',
+    parser.add_argument('--cv_strategy', type=str, default='shuffle_split',
                         choices=['kfold', 'shuffle_split'],
                         help='Cross-validation strategy.')
     parser.add_argument('--seed', type=int, default=20,
@@ -29,9 +36,16 @@ def parse_args() -> argparse.Namespace:
                         help='Proportion of the dataset to include in the train split.')
                         
     # Imbalance handling arguments
-    parser.add_argument('--imbalance_handling', type=str, default='sampler',
-                        choices=['sampler', 'loss', 'none'],
-                        help='Strategy to handle class imbalance.')
+    parser.add_argument('--imbalance_handling', type=str, default='both',
+                        choices=['sampler', 'loss', 'both', 'none'],
+                        help='Strategy to handle class imbalance. "both" uses sampler + weighted loss.')
+    parser.add_argument('--sampler_mode', type=str, default='balanced',
+                        choices=['balanced', 'soft_undersample'],
+                        help='Sampler behavior when imbalance_handling uses sampler.')
+    parser.add_argument('--undersample_strength', type=float, default=0.7,
+                        help='Maximum soft-undersampling strength in [0, 1]. 0 keeps natural distribution, 1 approaches class-balanced sampling.')
+    parser.add_argument('--undersample_warmup_epochs', type=int, default=10,
+                        help='Epochs used to ramp undersample strength from 0 to undersample_strength.')
 
     # Processing arguments
     parser.add_argument('--processing_mode', type=str, default='static',
@@ -57,10 +71,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--augmentation', type=str, default='weak',
                         choices=['none', 'weak', 'strong'],
                         help='Applies augmentation to training.')
+    parser.add_argument('--conditional_augmentation', action='store_true',
+                        help='Apply augmentation preferentially to rare classes only.')
+    parser.add_argument('--rare_class_threshold', type=int, default=30,
+                        help='A class is considered rare if train-fold count <= this value.')
+    parser.add_argument('--non_rare_aug_prob', type=float, default=0.0,
+                        help='When conditional augmentation is enabled, probability of augmenting non-rare classes.')
     parser.add_argument('--batch_size', type=int, default=64,
                         help='Training batch size.')
-    parser.add_argument('--lr', type=float, default=1e-5,
-                        help='Learning rate used for training.')
+    parser.add_argument('--lr', type=float, default=1e-4,
+                        help='Learning rate for backbone (pretrained layers).')
+    parser.add_argument('--lr_head', type=float, default=1e-3,
+                        help='Learning rate for randomly-initialized head layers.')
+    parser.add_argument('--weight_decay', type=float, default=1e-4,
+                        help='Weight decay (L2 regularization) for AdamW.')
+    parser.add_argument('--label_smoothing', type=float, default=0.1,
+                        help='Label smoothing factor for cross-entropy loss (0=off).')
     parser.add_argument('--epochs', type=int, default=30,
                         help='Number of epochs.')
     parser.add_argument('--check_val_every_n_epoch', type=int, default=1,
@@ -91,7 +117,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--no_pennylane', dest='use_pennylane', action='store_false',
                         help='Use classical MLP fallback instead of PennyLane VQC.')
     parser.add_argument('--freeze_resnet_backbone', action='store_true',
-                        help='Freeze ResNet18 backbone inside the hybrid MPS+VQC classifier.')
+                        help='Freeze ResNet18 up to layer3 inside the hybrid MPS+VQC classifier (layer4 stays trainable).')
     
     # Adversarial arguments
     parser.add_argument('--adv_parameters',
@@ -106,5 +132,11 @@ def parse_args() -> argparse.Namespace:
                         help='WandB entity (username)')
     parser.add_argument('--run_name', type=str, default=None,
                         help='Optional run name for WandB')
+    parser.add_argument('--wandb_watch', action='store_true',
+                        help='Enable wandb.watch() gradient tracking (can add overhead).')
+    parser.add_argument('--wandb_batch_log_freq', type=int, default=0,
+                        help='Log training batch metrics every N steps (0 disables batch-level logging).')
+    parser.add_argument('--wandb_detailed_val_log_freq', type=int, default=0,
+                        help='Log detailed validation artifacts (CM table/images) every N epochs (0 disables).')
 
     return parser.parse_args()

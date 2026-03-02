@@ -84,7 +84,6 @@ class CompetitiveMPSBridgeV2(nn.Module):
         hidden_dim: int = 128,
         temperature: float = 1.0,
         renorm_stride: int = 2,
-        renorm_after_gating: bool = True,
         eps: float = 1e-8,
     ):
         super().__init__()
@@ -97,7 +96,6 @@ class CompetitiveMPSBridgeV2(nn.Module):
         self.Fpc = feature_dim // n_sites
         self.temperature = temperature
         self.renorm_stride = max(1, int(renorm_stride))
-        self.renorm_after_gating = renorm_after_gating
         self.eps = eps
 
         # Per-site encoders
@@ -170,7 +168,7 @@ class CompetitiveMPSBridgeV2(nn.Module):
 
     def _right_envs(self, amplitudes: torch.Tensor) -> List[torch.Tensor]:
         B = amplitudes.shape[0]
-        right_envs: List[Optional[torch.Tensor]] = [None] * (self.Q + 1)
+        right_envs = [None] * (self.Q + 1)
         state = torch.ones((B, 1), device=amplitudes.device, dtype=amplitudes.dtype)
         right_envs[self.Q] = state
 
@@ -183,7 +181,7 @@ class CompetitiveMPSBridgeV2(nn.Module):
                 state = _l2_normalize(state, dim=-1, eps=self.eps)
             right_envs[i] = state
 
-        return [t for t in right_envs]  # type: ignore
+        return right_envs
 
     def _site_expectations(
         self,
@@ -221,8 +219,6 @@ class CompetitiveMPSBridgeV2(nn.Module):
     def forward(self, input_features: torch.Tensor) -> torch.Tensor:
         amplitudes, gates = self._amps(input_features)
         amplitudes = amplitudes * gates.unsqueeze(-1)
-        if self.renorm_after_gating:
-            amplitudes = _l2_normalize(amplitudes, dim=-1, eps=self.eps)
 
         left_envs = self._left_envs(amplitudes)
         right_envs = self._right_envs(amplitudes)
@@ -255,8 +251,7 @@ class PennyLaneQuantumLayer(nn.Module):
         except ImportError:
             raise ImportError(
                 "PennyLane is required for the quantum layer but is not installed. "
-                "Install it with: pip install pennylane\n"
-                "Or use --no_pennylane to fall back to a classical MLP substitute."
+                "Or use --no_pennylane to fall back to a classical MLP."
             )
 
         # Try fast backends in order: lightning.gpu > lightning.qubit > default.qubit
@@ -309,7 +304,10 @@ class PennyLaneQuantumLayer(nn.Module):
 # ---------------------------------------------------------------------------
 
 class ResNet18FeatureExtractor(nn.Module):
-    """Pretrained ResNet18 with final FC removed, outputs 512-d feature vector."""
+    """Pretrained ResNet18 with final FC removed, outputs 512-d feature vector.
+
+    When freeze=True, only layer4 remains trainable (stem + layer1-3 are frozen).
+    """
 
     def __init__(self, pretrained: bool = True, freeze: bool = True):
         super().__init__()
@@ -320,6 +318,9 @@ class ResNet18FeatureExtractor(nn.Module):
         if freeze:
             for p in self.backbone.parameters():
                 p.requires_grad = False
+            # Keep only the last ResNet stage trainable for adaptation.
+            for p in m.layer4.parameters():
+                p.requires_grad = True
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.backbone(x).flatten(1)
@@ -346,7 +347,7 @@ class HybridMPSClassifier(nn.Module):
         mps_phys_dim: int = 2,
         bridge_hidden_dim: int = 128,
         vqc_layers: int = 2,
-        freeze_resnet: bool = False,
+        freeze_resnet: bool = True,
         use_pennylane: bool = True,
     ):
         super().__init__()
@@ -363,7 +364,6 @@ class HybridMPSClassifier(nn.Module):
             hidden_dim=bridge_hidden_dim,
             temperature=1.0,
             renorm_stride=2,
-            renorm_after_gating=True,
         )
 
         if use_pennylane:
