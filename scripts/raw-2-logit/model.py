@@ -77,7 +77,6 @@ class EndToEndModel(nn.Module):
                  augmentation_target_classes: Optional[List[int]] = None,
                  non_target_augmentation_prob: float = 1.0,
                  augmentation_on_eval: bool = False,
-                 freeze_classifier: bool = False,
                  freeze_processor: bool = False):
         super().__init__()
 
@@ -91,12 +90,7 @@ class EndToEndModel(nn.Module):
         self.non_target_augmentation_prob = float(non_target_augmentation_prob)
 
         self.augmentation_on_eval = augmentation_on_eval
-
-        self.freeze_classifier = freeze_classifier
         self.freeze_processor = freeze_processor
-
-        if freeze_classifier:
-            self._freeze_module(self.classifier)
         
         if freeze_processor and self.processor is not None:
              self._freeze_module(self.processor)

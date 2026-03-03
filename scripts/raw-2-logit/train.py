@@ -41,10 +41,11 @@ def calculate_accuracy(output: torch.Tensor, target: torch.Tensor) -> Tuple[int,
         return correct, len(target)
 
 
-def compute_metrics(all_preds: np.ndarray, all_labels: np.ndarray,
+def compute_metrics(all_preds: np.ndarray, 
+                    all_labels: np.ndarray,
                     class_names: Optional[List[str]] = None) -> Dict[str, Any]:
     """Compute classification metrics suited for imbalanced multiclass problems."""
-    metrics: Dict[str, Any] = {}
+    metrics = {}
 
     metrics['accuracy'] = (all_preds == all_labels).mean()
     metrics['balanced_accuracy'] = balanced_accuracy_score(all_labels, all_preds)
@@ -132,9 +133,7 @@ def train_one_epoch(model: nn.Module,
                     criterion: nn.Module,
                     optimizer: optim.Optimizer,
                     device: torch.device,
-                    epoch: int,
-                    class_names: Optional[List[str]] = None,
-                    batch_log_freq: int = 0) -> Tuple[float, Dict[str, Any]]:
+                    class_names: Optional[List[str]] = None) -> Tuple[float, Dict[str, Any]]:
     """Running training for one epoch. Returns (avg_loss, metrics_dict)."""
     model.train()
     running_loss = 0.0
@@ -146,7 +145,7 @@ def train_one_epoch(model: nn.Module,
     if total_steps == 0:
         raise RuntimeError("Training dataloader is empty. Check dataset and split configuration.")
 
-    for i, (inputs, labels) in enumerate(dataloader):
+    for inputs, labels in dataloader:
         inputs = inputs.to(device)
         labels = labels.to(device)
 
@@ -167,15 +166,6 @@ def train_one_epoch(model: nn.Module,
         all_preds.append(preds.detach().cpu().numpy())
         all_labels.append(labels.detach().cpu().numpy())
 
-        # Optional batch-level logging (disabled by default to reduce overhead).
-        if batch_log_freq > 0 and i % batch_log_freq == 0:
-            batch_correct = preds.eq(labels).sum().item()
-            wandb.log({
-                "train/batch_loss": loss.item(),
-                "train/batch_acc": batch_correct / len(labels),
-                "epoch": epoch
-            })
-
     avg_loss = running_loss / total_steps
     metrics = compute_metrics(np.concatenate(all_preds), np.concatenate(all_labels), class_names)
 
@@ -186,9 +176,7 @@ def validate(model: nn.Module,
              dataloader: DataLoader,
              criterion: nn.Module,
              device: torch.device,
-             class_names: Optional[List[str]] = None,
-             epoch: int = 0,
-             detailed_log_freq: int = 0) -> Tuple[float, Dict[str, Any]]:
+             class_names: Optional[List[str]] = None) -> Tuple[float, Dict[str, Any]]:
     """Running validation. Returns (avg_loss, metrics_dict)."""
     model.eval()
     running_loss = 0.0
@@ -200,13 +188,8 @@ def validate(model: nn.Module,
     if total_steps == 0:
         raise RuntimeError("Validation dataloader is empty. Check dataset and split configuration.")
 
-    # For ISP visualization (once per validation)
-    vis_inputs = None
-    vis_predictions = None
-    vis_labels = None
-
     with torch.no_grad():
-        for i, (inputs, labels) in enumerate(dataloader):
+        for inputs, labels in dataloader:
             inputs = inputs.to(device)
             labels = labels.to(device)
 
@@ -219,68 +202,25 @@ def validate(model: nn.Module,
             all_preds.append(preds.cpu().numpy())
             all_labels.append(labels.cpu().numpy())
 
-            # Save first batch for visualization
-            if i == 0:
-                vis_inputs = inputs
-                vis_predictions = outputs
-                vis_labels = labels
-
     avg_loss = running_loss / total_steps
 
     all_preds_np = np.concatenate(all_preds)
     all_labels_np = np.concatenate(all_labels)
     metrics = compute_metrics(all_preds_np, all_labels_np, class_names)
 
-    detailed_logging = detailed_log_freq > 0 and epoch > 0 and (epoch % detailed_log_freq == 0)
-
-    if detailed_logging:
-        # Log confusion matrix to WandB
-        try:
-            cm_labels = metrics['cm_labels']
-            wandb.log({
-                "val/confusion_matrix": wandb.plot.confusion_matrix(
-                    probs=None,
-                    y_true=all_labels_np.tolist(),
-                    preds=all_preds_np.tolist(),
-                    class_names=cm_labels,
-                )
-            }, commit=False)
-        except Exception as e:
-            print(f"[Warning] Could not log confusion matrix to WandB: {e}")
-
-        # Log per-class metrics as WandB table
-        try:
-            table = wandb.Table(columns=["class", "precision", "recall", "f1"])
-            for row in metrics['per_class']:
-                table.add_data(row['class'], row['precision'], row['recall'], row['f1'])
-            wandb.log({"val/per_class_metrics": table}, commit=False)
-        except Exception as e:
-            print(f"[Warning] Could not log per-class table to WandB: {e}")
-
-        # Log processed images if possible
-        if vis_inputs is not None:
-            try:
-                if model.processor is not None:
-                    with torch.no_grad():
-                        processed_imgs = model.processor(vis_inputs)
-
-                    n_vis = min(8, processed_imgs.size(0))
-                    images_to_log = []
-
-                    for idx in range(n_vis):
-                        img = processed_imgs[idx].cpu().detach()
-                        img = torch.clamp(img, 0, 1)
-
-                        pred_cls = torch.argmax(vis_predictions[idx]).item()
-                        true_cls = vis_labels[idx].item()
-
-                        images_to_log.append(
-                            wandb.Image(img, caption=f"Pred: {pred_cls} | True: {true_cls}")
-                        )
-
-                    wandb.log({"val/processed_images": images_to_log}, commit=False)
-            except Exception as e:
-                print(f"[Warning] Could not log images to WandB: {e}")
+    # Always log confusion matrix for multiclass monitoring.
+    try:
+        cm_labels = metrics['cm_labels']
+        wandb.log({
+            "val/confusion_matrix": wandb.plot.confusion_matrix(
+                probs=None,
+                y_true=all_labels_np.tolist(),
+                preds=all_preds_np.tolist(),
+                class_names=cm_labels,
+            )
+        }, commit=False)
+    except Exception as e:
+        print(f"[Warning] Could not log confusion matrix to WandB: {e}")
 
     return avg_loss, metrics
 
@@ -318,11 +258,6 @@ def run_train(args: argparse.Namespace) -> None:
         raise ValueError(f"--undersample_strength must be in [0, 1], got {args.undersample_strength}")
     if args.undersample_warmup_epochs < 1:
         raise ValueError(f"--undersample_warmup_epochs must be >= 1, got {args.undersample_warmup_epochs}")
-    if args.wandb_batch_log_freq < 0:
-        raise ValueError(f"--wandb_batch_log_freq must be >= 0, got {args.wandb_batch_log_freq}")
-    if args.wandb_detailed_val_log_freq < 0:
-        raise ValueError(f"--wandb_detailed_val_log_freq must be >= 0, got {args.wandb_detailed_val_log_freq}")
-
     # 3. Create K-Fold splits
     idxs_kfold = k_fold(dataset, n_splits=args.n_splits, seed=args.seed, train_size=args.train_size, strategy=args.cv_strategy)
 
@@ -364,10 +299,6 @@ def run_train(args: argparse.Namespace) -> None:
                 f"[Warning] Classes absent in train fold: {missing_in_train}. "
                 "Loss/sampler weighting for these classes will be set to 0."
             )
-        wandb.log({
-            **{f"data/fold_train_count/{k}": v for k, v in train_counts_named.items()},
-            **{f"data/fold_val_count/{k}": v for k, v in valid_counts_named.items()},
-        }, commit=False)
         
         print(f'Processing Mode: {args.processing_mode}')
 
@@ -444,9 +375,6 @@ def run_train(args: argparse.Namespace) -> None:
             if len(list(processor.parameters())) == 0:
                 print('Note: Freezing processor requested but it has no learnable parameters.')
         
-        if args.freeze_processor and args.freeze_classifier:
-            raise ValueError("Both processor and classifier are frozen. Nothing to train.")
-
         # 6. Initialize End-to-End Model
         augmentation = get_augmentation(args.augmentation)
         augmentation_target_classes = None
@@ -474,7 +402,6 @@ def run_train(args: argparse.Namespace) -> None:
             augmentation=augmentation,
             augmentation_target_classes=augmentation_target_classes,
             non_target_augmentation_prob=non_target_augmentation_prob,
-            freeze_classifier=args.freeze_classifier,
             freeze_processor=args.freeze_processor,
         )
         model = model.to(DEVICE)
@@ -567,8 +494,8 @@ def run_train(args: argparse.Namespace) -> None:
         
         # Differential learning rates: backbone (pretrained) gets lower lr,
         # head (randomly initialized) gets higher lr for faster convergence.
-        backbone_params: List[nn.Parameter] = []
-        head_params: List[nn.Parameter] = []
+        backbone_params = []
+        head_params = []
 
         if args.classifier_network in ('resnet18', 'resnet34', 'resnet50'):
             if args.classifier_pretrained:
@@ -658,7 +585,7 @@ def run_train(args: argparse.Namespace) -> None:
 
         # DataLoader setup
         num_workers = max(0, args.num_workers)
-        loader_kwargs: Dict[str, Any] = {
+        loader_kwargs = {
             "batch_size": args.batch_size,
             "num_workers": num_workers,
             "pin_memory": (DEVICE.type == 'cuda'),
@@ -687,10 +614,9 @@ def run_train(args: argparse.Namespace) -> None:
             **loader_kwargs,
         )
 
-        def update_dynamic_sampler(epoch: int) -> Dict[str, float]:
-            sampler_log: Dict[str, float] = {}
+        def update_dynamic_sampler(epoch: int) -> None:
             if not dynamic_soft_sampler:
-                return sampler_log
+                return
             if dynamic_sampler is None:
                 raise RuntimeError("dynamic_soft_sampler is enabled but dynamic_sampler is None.")
 
@@ -699,17 +625,12 @@ def run_train(args: argparse.Namespace) -> None:
                 max_strength=args.undersample_strength,
                 warmup_epochs=args.undersample_warmup_epochs,
             )
-            sample_weights, class_weight = compute_soft_undersampling_weights(
+            sample_weights, _ = compute_soft_undersampling_weights(
                 train_labels=train_labels,
                 class_counts=class_counts,
                 strength=current_strength,
             )
             dynamic_sampler.weights = sample_weights
-            sampler_log["sampler/undersample_strength"] = current_strength
-            for cls_idx, weight in class_weight.items():
-                cls_name = class_names[cls_idx]
-                sampler_log[f"sampler/class_weight/{cls_name}"] = float(weight)
-            return sampler_log
 
         # 9. Training Loop
         best_macro_f1 = 0.0
@@ -721,7 +642,7 @@ def run_train(args: argparse.Namespace) -> None:
 
         epoch_pbar = tqdm(range(1, args.epochs + 1), desc="Training Epochs")
         for epoch in epoch_pbar:
-            sampler_epoch_log = update_dynamic_sampler(epoch=epoch)
+            update_dynamic_sampler(epoch=epoch)
 
             train_loss, train_metrics = train_one_epoch(
                 model,
@@ -729,9 +650,7 @@ def run_train(args: argparse.Namespace) -> None:
                 criterion,
                 optimizer,
                 DEVICE,
-                epoch,
                 class_names,
-                batch_log_freq=args.wandb_batch_log_freq,
             )
 
             # Step the LR scheduler
@@ -744,8 +663,6 @@ def run_train(args: argparse.Namespace) -> None:
                     criterion,
                     DEVICE,
                     class_names,
-                    epoch=epoch,
-                    detailed_log_freq=args.wandb_detailed_val_log_freq,
                 )
 
                 # Update progress bar description
@@ -755,16 +672,12 @@ def run_train(args: argparse.Namespace) -> None:
                     'bAcc': f'{val_metrics["balanced_accuracy"]:.4f}',
                 })
 
-                # Log Epoch Metrics + learning rates
-                lr_log = {f"lr/group_{i}": pg['lr'] for i, pg in enumerate(optimizer.param_groups)}
-                train_count_log = {
-                    f"train/effective_count/{k}": v
-                    for k, v in train_metrics.get('label_counts', {}).items()
-                }
-                val_count_log = {
-                    f"val/effective_count/{k}": v
-                    for k, v in val_metrics.get('label_counts', {}).items()
-                }
+                per_class_val_log = {}
+                for row in val_metrics.get('per_class', []):
+                    cls_name = row['class']
+                    per_class_val_log[f"val/per_class_precision/{cls_name}"] = float(row['precision'])
+                    per_class_val_log[f"val/per_class_recall/{cls_name}"] = float(row['recall'])
+
                 wandb.log({
                     "train/loss": train_loss,
                     "train/acc": train_metrics['accuracy'],
@@ -776,11 +689,7 @@ def run_train(args: argparse.Namespace) -> None:
                     "val/weighted_f1": val_metrics['weighted_f1'],
                     "val/macro_precision": val_metrics['macro_precision'],
                     "val/macro_recall": val_metrics['macro_recall'],
-                    "epoch": epoch,
-                    **lr_log,
-                    **train_count_log,
-                    **val_count_log,
-                    **sampler_epoch_log,
+                    **per_class_val_log,
                 })
 
                 if val_metrics['macro_f1'] > best_macro_f1:

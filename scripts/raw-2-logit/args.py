@@ -64,8 +64,6 @@ def parse_args() -> argparse.Namespace:
     # Model freezing arguments
     parser.add_argument('--freeze_processor', action='store_true',
                         help='Freeze raw to rgb processing model weights.')
-    parser.add_argument('--freeze_classifier', action='store_true',
-                        help='Freeze classification model weights.')
 
     # Training arguments
     parser.add_argument('--augmentation', type=str, default='weak',
@@ -134,9 +132,5 @@ def parse_args() -> argparse.Namespace:
                         help='Optional run name for WandB')
     parser.add_argument('--wandb_watch', action='store_true',
                         help='Enable wandb.watch() gradient tracking (can add overhead).')
-    parser.add_argument('--wandb_batch_log_freq', type=int, default=0,
-                        help='Log training batch metrics every N steps (0 disables batch-level logging).')
-    parser.add_argument('--wandb_detailed_val_log_freq', type=int, default=0,
-                        help='Log detailed validation artifacts (CM table/images) every N epochs (0 disables).')
 
     return parser.parse_args()
