@@ -9,3 +9,8 @@ data/
 results/
 pennylane/
 plots/
+wandb/
+.vscode/
+*.zip
+tmpclaude*
+debug*
