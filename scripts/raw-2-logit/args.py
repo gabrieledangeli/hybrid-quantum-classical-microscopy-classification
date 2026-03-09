@@ -115,7 +115,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--no_pennylane', dest='use_pennylane', action='store_false',
                         help='Use classical MLP fallback instead of PennyLane VQC.')
     parser.add_argument('--freeze_resnet_backbone', action='store_true',
-                        help='Freeze ResNet18 up to layer3 inside the hybrid MPS+VQC classifier (layer4 stays trainable).')
+                        help='Freeze ResNet stem and layer1-3 so only layer4 and final head remain trainable (applies to classic ResNet and hybrid backbone).')
     
     # Adversarial arguments
     parser.add_argument('--adv_parameters',

@@ -33,13 +33,6 @@ DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 if torch.cuda.is_available():
     torch.backends.cudnn.benchmark = True
 
-def calculate_accuracy(output: torch.Tensor, target: torch.Tensor) -> Tuple[int, int]:
-    """Computes the number of correct predictions and total samples."""
-    with torch.no_grad():
-        pred = torch.argmax(output, dim=1)
-        correct = pred.eq(target.view_as(pred)).sum().item()
-        return correct, len(target)
-
 
 def compute_metrics(all_preds: np.ndarray, 
                     all_labels: np.ndarray,
@@ -367,8 +360,11 @@ def run_train(args: argparse.Namespace) -> None:
             classifier = resnet_model(
                 model_name=args.classifier_network,
                 pretrained=args.classifier_pretrained,
-                fc_out_features=len(dataset.classes)
+                fc_out_features=len(dataset.classes),
+                freeze_backbone=args.freeze_resnet_backbone,
             )
+            if args.freeze_resnet_backbone:
+                print("[Info] Freezing classic ResNet stem/layer1-3; training only layer4 + fc.")
 
         if processor and args.freeze_processor:
              # Check if processor has parameters

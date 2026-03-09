@@ -13,7 +13,8 @@ from hybrid_model import HybridMPSClassifier
 
 def resnet_model(model_name: str = 'resnet18',
                  pretrained: bool = True,
-                 fc_out_features: int = 2) -> ResNet:
+                 fc_out_features: int = 2,
+                 freeze_backbone: bool = False) -> ResNet:
     """
     Factory function to create a ResNet model with a custom fully connected layer.
     """
@@ -34,6 +35,15 @@ def resnet_model(model_name: str = 'resnet18',
         out_features=fc_out_features, 
         bias=True
     )
+
+    if freeze_backbone:
+        # Keep only layer4 + classification head trainable.
+        for param in resnet.parameters():
+            param.requires_grad = False
+        for param in resnet.layer4.parameters():
+            param.requires_grad = True
+        for param in resnet.fc.parameters():
+            param.requires_grad = True
     
     return resnet
 
