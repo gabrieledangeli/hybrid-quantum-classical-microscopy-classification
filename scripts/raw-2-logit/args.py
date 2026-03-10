@@ -87,6 +87,10 @@ def parse_args() -> argparse.Namespace:
                         help='Label smoothing factor for cross-entropy loss (0=off).')
     parser.add_argument('--epochs', type=int, default=30,
                         help='Number of epochs.')
+    parser.add_argument('--lr_warmup_epochs', type=int, default=0,
+                        help='Number of linear LR warmup epochs (0=off). '
+                             'Ramps LR from 1%% to 100%% before cosine decay. '
+                             'Recommended 5-10 for hybrid_mps_vqc to prevent early collapse.')
     parser.add_argument('--check_val_every_n_epoch', type=int, default=1,
                         help='Frequency of validation checks.')
     parser.add_argument('--save_model', action='store_true',

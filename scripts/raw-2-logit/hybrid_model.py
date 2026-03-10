@@ -378,10 +378,13 @@ class HybridMPSClassifier(nn.Module):
         self.q_norm = nn.BatchNorm1d(n_qubits)
         self.q_proj = nn.Linear(n_qubits, n_classes)
 
+        # Learnable angle scaling — initialized to 0.75π but adapts during training.
+        self.angle_scale = nn.Parameter(torch.tensor(0.75 * math.pi))
+
     def forward(self, images: torch.Tensor) -> torch.Tensor:
         classical_features = self.resnet(images)                    # [B, 512]
         quantum_inputs = self.mps_bridge(classical_features)        # [B, Q]
-        quantum_inputs = quantum_inputs * (0.75 * math.pi)          # scale to angles
+        quantum_inputs = quantum_inputs * self.angle_scale           # learnable scaling
         quantum_outputs = self.quantum(quantum_inputs)              # [B, Q]
         quantum_outputs = self.q_norm(quantum_outputs)
         logits = self.q_proj(quantum_outputs)                       # [B, n_classes]

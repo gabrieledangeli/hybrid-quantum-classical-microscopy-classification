@@ -539,10 +539,23 @@ def run_train(args: argparse.Namespace) -> None:
         else:
             raise ValueError("No trainable parameters found. Check freeze settings.")
 
-        # Cosine annealing scheduler
-        scheduler = optim.lr_scheduler.CosineAnnealingLR(
-            optimizer, T_max=args.epochs, eta_min=1e-6
+        # Warmup + Cosine annealing scheduler
+        cosine_scheduler = optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=max(1, args.epochs - args.lr_warmup_epochs), eta_min=1e-6
         )
+        if args.lr_warmup_epochs > 0:
+            warmup_scheduler = optim.lr_scheduler.LinearLR(
+                optimizer, start_factor=0.01, end_factor=1.0,
+                total_iters=args.lr_warmup_epochs,
+            )
+            scheduler = optim.lr_scheduler.SequentialLR(
+                optimizer,
+                schedulers=[warmup_scheduler, cosine_scheduler],
+                milestones=[args.lr_warmup_epochs],
+            )
+            print(f"[Info] LR warmup: {args.lr_warmup_epochs} epochs (1% -> 100%), then cosine decay.")
+        else:
+            scheduler = cosine_scheduler
 
         # Prepare state dict for saving
         experiment_dir = os.path.join('results', args.dataset, args.processing_mode)
