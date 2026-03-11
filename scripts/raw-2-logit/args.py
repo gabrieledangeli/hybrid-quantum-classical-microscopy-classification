@@ -88,7 +88,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--loss_fn', type=str, default='cross_entropy',
                         choices=['cross_entropy', 'focal'],
                         help='Loss function. "focal" uses Focal Loss (Lin et al., 2017) '
-                             'which down-weights easy examples and focuses on hard ones — '
+                             'which down-weights easy examples and focuses on hard ones '
                              'recommended for heavily imbalanced datasets with rare classes.')
     parser.add_argument('--focal_gamma', type=float, default=2.0,
                         help='Focusing parameter gamma for Focal Loss. '
