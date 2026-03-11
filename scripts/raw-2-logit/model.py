@@ -8,7 +8,7 @@ import torch.optim
 from torchvision.models import resnet18, resnet34, resnet50, ResNet, ResNet18_Weights, ResNet34_Weights, ResNet50_Weights
 import torchvision.utils as vutils
 
-from hybrid_model import HybridMPSClassifier
+from hybrid_model import HybridTNClassifier
 
 
 def resnet_model(model_name: str = 'resnet18',
@@ -48,7 +48,7 @@ def resnet_model(model_name: str = 'resnet18',
     return resnet
 
 
-def hybrid_mps_vqc_model(
+def hybrid_tn_model(
     fc_out_features: int,
     n_qubits: int = 8,
     mps_bond_dim: int = 64,
@@ -57,12 +57,18 @@ def hybrid_mps_vqc_model(
     vqc_layers: int = 2,
     freeze_resnet: bool = True,
     use_pennylane: bool = True,
-) -> HybridMPSClassifier:
+    tn_bridge: str = "mps",
+    peps_rows: Optional[int] = None,
+    peps_cols: Optional[int] = None,
+    peps_message_passing_steps: int = 3,
+    backbone: str = "resnet18",
+    backbone_weights: Optional[str] = None,
+) -> HybridTNClassifier:
     """
-    Factory function to create a Hybrid MPS + VQC classifier.
-    ResNet18 -> MPS Bridge -> VQC -> BN -> Linear.
+    Factory function to create a Hybrid TN + VQC classifier.
+    ResNet -> (MPS or PEPS) bridge -> VQC -> BN -> Linear.
     """
-    return HybridMPSClassifier(
+    return HybridTNClassifier(
         n_classes=fc_out_features,
         n_qubits=n_qubits,
         mps_bond_dim=mps_bond_dim,
@@ -71,6 +77,12 @@ def hybrid_mps_vqc_model(
         vqc_layers=vqc_layers,
         freeze_resnet=freeze_resnet,
         use_pennylane=use_pennylane,
+        bridge_type=tn_bridge,
+        peps_rows=peps_rows,
+        peps_cols=peps_cols,
+        peps_message_passing_steps=peps_message_passing_steps,
+        backbone=backbone,
+        backbone_weights=backbone_weights,
     )
 
 

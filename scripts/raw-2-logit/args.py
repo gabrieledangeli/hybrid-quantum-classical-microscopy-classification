@@ -85,12 +85,21 @@ def parse_args() -> argparse.Namespace:
                         help='Weight decay (L2 regularization) for AdamW.')
     parser.add_argument('--label_smoothing', type=float, default=0.1,
                         help='Label smoothing factor for cross-entropy loss (0=off).')
+    parser.add_argument('--loss_fn', type=str, default='cross_entropy',
+                        choices=['cross_entropy', 'focal'],
+                        help='Loss function. "focal" uses Focal Loss (Lin et al., 2017) '
+                             'which down-weights easy examples and focuses on hard ones — '
+                             'recommended for heavily imbalanced datasets with rare classes.')
+    parser.add_argument('--focal_gamma', type=float, default=2.0,
+                        help='Focusing parameter gamma for Focal Loss. '
+                             'gamma=0 reduces to CE; gamma=2 is the standard default; '
+                             'gamma=3-5 for extreme imbalance. Only used when --loss_fn focal.')
     parser.add_argument('--epochs', type=int, default=30,
                         help='Number of epochs.')
     parser.add_argument('--lr_warmup_epochs', type=int, default=0,
                         help='Number of linear LR warmup epochs (0=off). '
                              'Ramps LR from 1%% to 100%% before cosine decay. '
-                             'Recommended 5-10 for hybrid_mps_vqc to prevent early collapse.')
+                             'Recommended 5-10 for hybrid_tn to prevent early collapse.')
     parser.add_argument('--check_val_every_n_epoch', type=int, default=1,
                         help='Frequency of validation checks.')
     parser.add_argument('--save_model', action='store_true',
@@ -98,20 +107,29 @@ def parse_args() -> argparse.Namespace:
     
     # Classifier arguments
     parser.add_argument('--classifier_network', type=str, default='resnet18',
-                        choices=['resnet18', 'resnet34', 'resnet50', 'hybrid_mps_vqc'],
+                        choices=['resnet18', 'resnet34', 'resnet50', 'hybrid_tn'],
                         help='Type of pretrained network.')
     parser.add_argument('--classifier_pretrained', action='store_true',
                         help='Whether to use a pre-trained model or not.')
 
-    # Hybrid MPS + VQC arguments (used when --classifier_network hybrid_mps_vqc)
+    # Hybrid TN + VQC arguments (used when --classifier_network hybrid_tn)
     parser.add_argument('--n_qubits', type=int, default=8,
-                        help='Number of qubits / MPS sites.')
+                        help='Number of qubits / tensor-network sites.')
     parser.add_argument('--mps_bond_dim', type=int, default=64,
                         help='Bond dimension for MPS tensor network.')
     parser.add_argument('--mps_phys_dim', type=int, default=2,
                         help='Physical dimension per MPS site (2 = qubits).')
     parser.add_argument('--mps_hidden_dim', type=int, default=128,
                         help='Hidden dimension in per-site MPS encoders.')
+    parser.add_argument('--tn_bridge', type=str, default='mps',
+                        choices=['mps', 'peps'],
+                        help='Tensor-network bridge type used before VQC.')
+    parser.add_argument('--peps_rows', type=int, default=None,
+                        help='Optional number of PEPS rows. Must satisfy rows*cols=n_qubits.')
+    parser.add_argument('--peps_cols', type=int, default=None,
+                        help='Optional number of PEPS cols. Must satisfy rows*cols=n_qubits.')
+    parser.add_argument('--peps_message_passing_steps', type=int, default=3,
+                        help='Number of local message-passing iterations in PEPS bridge.')
     parser.add_argument('--vqc_layers', type=int, default=2,
                         help='Number of parametrized layers in the variational quantum circuit.')
     parser.add_argument('--use_pennylane', action='store_true', default=True,
@@ -120,6 +138,18 @@ def parse_args() -> argparse.Namespace:
                         help='Use classical MLP fallback instead of PennyLane VQC.')
     parser.add_argument('--freeze_resnet_backbone', action='store_true',
                         help='Freeze ResNet stem and layer1-3 so only layer4 and final head remain trainable (applies to classic ResNet and hybrid backbone).')
+    parser.add_argument('--backbone', type=str, default='resnet18',
+                        choices=['resnet18', 'resnet34', 'resnet50'],
+                        help='ResNet backbone architecture for the hybrid model. '
+                             'resnet50 outputs 2048-d features (vs 512-d for resnet18/34). '
+                             'Use with --backbone_weights to load pathology-pretrained weights '
+                             '(e.g. RetCCL).')
+    parser.add_argument('--backbone_weights', type=str, default=None,
+                        help='Path to a .pth state-dict file with custom backbone weights '
+                             '(e.g. pathology-pretrained RetCCL for resnet50). '
+                             'If None, uses default ImageNet-pretrained weights. '
+                             'Key prefixes like module.*/backbone.*/encoder.* are stripped '
+                             'automatically.')
     
     # Adversarial arguments
     parser.add_argument('--adv_parameters',

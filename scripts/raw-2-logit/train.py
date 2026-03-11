@@ -9,6 +9,7 @@ import numpy as np
 from datetime import datetime
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 import torchvision.transforms as T
 from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
@@ -19,14 +20,16 @@ from sklearn.metrics import (
 
 import wandb
 
+
 # Local imports
 from args import parse_args
+from losses import FocalLoss
 from dataset_utils import k_fold
 from augmentation import get_augmentation, set_global_seed
 from dataset import Subset, get_dataset
 from pipeline_numpy import RawProcessingPipeline
 from pipeline_torch import RawToRGB, ParametrizedProcessing, NNProcessing
-from model import resnet_model, hybrid_mps_vqc_model, EndToEndModel, TensorNormalize
+from model import resnet_model, hybrid_tn_model, EndToEndModel, TensorNormalize
 
 # Global Constants
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -345,17 +348,30 @@ def run_train(args: argparse.Namespace) -> None:
                 normalization = post_mosaic_norm
 
         # 5. Initialize Classifier
-        if args.classifier_network == 'hybrid_mps_vqc':
-            classifier = hybrid_mps_vqc_model(
+        if args.classifier_network == 'hybrid_tn':
+            classifier = hybrid_tn_model(
                 fc_out_features=len(dataset.classes),
                 n_qubits=args.n_qubits,
                 mps_bond_dim=args.mps_bond_dim,
                 mps_phys_dim=args.mps_phys_dim,
                 mps_hidden_dim=args.mps_hidden_dim,
+                tn_bridge=args.tn_bridge,
+                peps_rows=args.peps_rows,
+                peps_cols=args.peps_cols,
+                peps_message_passing_steps=args.peps_message_passing_steps,
                 vqc_layers=args.vqc_layers,
                 freeze_resnet=args.freeze_resnet_backbone,
                 use_pennylane=args.use_pennylane,
+                backbone=args.backbone,
+                backbone_weights=args.backbone_weights,
             )
+            if args.tn_bridge == 'peps':
+                grid_desc = "auto"
+                if args.peps_rows is not None or args.peps_cols is not None:
+                    grid_desc = f"{args.peps_rows}x{args.peps_cols}"
+                print(f"[Info] Hybrid TN bridge: PEPS (grid={grid_desc}, message_passing_steps={args.peps_message_passing_steps}).")
+            else:
+                print("[Info] Hybrid TN bridge: MPS.")
         else:
             classifier = resnet_model(
                 model_name=args.classifier_network,
@@ -483,10 +499,18 @@ def run_train(args: argparse.Namespace) -> None:
             print("[Info] Combined strategy: sampler balances batches + loss weights gradients.")
 
         # Initialize Criterion with or without weights (+ label smoothing)
-        criterion = nn.CrossEntropyLoss(
-            weight=criterion_weight,
-            label_smoothing=args.label_smoothing,
-        )
+        if args.loss_fn == 'focal':
+            criterion = FocalLoss(
+                weight=criterion_weight,
+                gamma=args.focal_gamma,
+                label_smoothing=args.label_smoothing,
+            ).to(DEVICE)
+            print(f"[Info] Using Focal Loss (gamma={args.focal_gamma}, label_smoothing={args.label_smoothing}).")
+        else:
+            criterion = nn.CrossEntropyLoss(
+                weight=criterion_weight,
+                label_smoothing=args.label_smoothing,
+            )
         
         # Differential learning rates: backbone (pretrained) gets lower lr,
         # head (randomly initialized) gets higher lr for faster convergence.
