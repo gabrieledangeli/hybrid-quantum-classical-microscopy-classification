@@ -1,18 +1,48 @@
+# ── Python ───────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+dist/
+build/
+*.egg
+
+# ── Virtual environments ────────────────────────────────────────────────
 .venv/
 .env
-__pycache__/
-*.pyc
-.DS_Store
-.ipynb_checkpoints
-logs/
-checkpoints/
-data/
-results/
-pennylane/
-plots/
-wandb/
+venv/
+env/
+
+# ── Jupyter ─────────────────────────────────────────────────────────────
+.ipynb_checkpoints/
+
+# ── IDE / editor ────────────────────────────────────────────────────────
 .vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ── OS ──────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# ── Project: data & outputs ─────────────────────────────────────────────
+/data/
+/checkpoints/
+/results/
+/logs/
+/plots/
+/output*/
+
+# ── Experiment tracking ─────────────────────────────────────────────────
+wandb/
+
+# ── PennyLane cache ─────────────────────────────────────────────────────
+pennylane/
+
+# ── Temporary / generated ───────────────────────────────────────────────
 *.zip
 tmpclaude*
 debug*
-output*
