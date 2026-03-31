@@ -1,6 +1,16 @@
 """Command-line argument parsing for the training pipeline."""
 
 import argparse
+import os
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+# Load .env from the project root (two levels up from this file)
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+load_dotenv(_PROJECT_ROOT / ".env")
+
+DATA_DIR: str = os.environ.get("MICROSCOPY_ROOT", "./data")
 
 
 def parse_args() -> argparse.Namespace:
@@ -14,12 +24,10 @@ def parse_args() -> argparse.Namespace:
     ds.add_argument("--dataset", type=str, default="Microscopy",
                     choices=["Microscopy", "MicroscopyRGB"],
                     help="Dataset variant.")
-    ds.add_argument("--data_dir", type=str, default="./data",
-                    help="Root directory of the dataset.")
     ds.add_argument("--num_workers", type=int, default=4,
                     help="DataLoader worker processes.")
-    ds.add_argument("--min_samples_per_class", type=int, default=5,
-                    help="Minimum samples per class before rebalancing.")
+    ds.add_argument("--min_samples_per_class", type=int, default=15,
+                    help="Minimum total samples per class (≥15 ensures ≥10 train samples with train_size=0.7).")
     ds.add_argument("--below_threshold_strategy", type=str, default="drop",
                     choices=["drop", "merge_to_rare"],
                     help="How to handle classes below min_samples_per_class.")
@@ -35,7 +43,7 @@ def parse_args() -> argparse.Namespace:
                     help="Cross-validation strategy.")
     cv.add_argument("--seed", type=int, default=20,
                     help="Random seed for reproducibility.")
-    cv.add_argument("--train_size", type=float, default=0.8,
+    cv.add_argument("--train_size", type=float, default=0.7,
                     help="Proportion of the dataset in the train split.")
 
     # ── Imbalance handling ────────────────────────────────────────────────
@@ -157,4 +165,6 @@ def parse_args() -> argparse.Namespace:
     wb.add_argument("--wandb_watch", action="store_true",
                     help="Enable wandb.watch() gradient tracking.")
 
-    return parser.parse_args()
+    args = parser.parse_args()
+    args.data_dir = DATA_DIR
+    return args
