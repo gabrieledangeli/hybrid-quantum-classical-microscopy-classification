@@ -20,30 +20,6 @@ def _l2_normalize(x: torch.Tensor, dim: int = -1, eps: float = 1e-8) -> torch.Te
     return x / (x.norm(dim=dim, keepdim=True) + eps)
 
 
-def _factor_grid(n: int, rows: Optional[int], cols: Optional[int]) -> Tuple[int, int]:
-    """Resolve a 2-D grid whose area equals *n*."""
-    if n < 1:
-        raise ValueError(f"n must be ≥ 1, got {n}")
-    if rows is not None and cols is not None:
-        if int(rows) * int(cols) != n:
-            raise ValueError(f"rows×cols={rows}×{cols} ≠ {n}")
-        return int(rows), int(cols)
-    if rows is not None:
-        r = int(rows)
-        if n % r:
-            raise ValueError(f"n={n} not divisible by rows={r}")
-        return r, n // r
-    if cols is not None:
-        c = int(cols)
-        if n % c:
-            raise ValueError(f"n={n} not divisible by cols={c}")
-        return n // c, c
-    r = int(math.sqrt(n))
-    while r > 1 and n % r:
-        r -= 1
-    return r, n // r
-
-
 def _generalized_ZX(dim: int, device=None, dtype=None) -> Tuple[torch.Tensor, torch.Tensor]:
     """Clock (Z) and shift (X) operators.  For ``dim=2`` returns Pauli Z, X."""
     if dim == 2:
@@ -199,72 +175,96 @@ class MPSBridge(nn.Module):
 # ── PEPS bridge ───────────────────────────────────────────────────────────
 
 
-class PEPSBridge(nn.Module):
-    """2-D PEPS-inspired bridge with iterative message passing.
+class _PEPSSpectralCore(nn.Module):
+    """Single PEPS tensor with Frobenius-normalised base and learnable scale."""
 
-    Uses a factorised mean-field contraction with learnable directional
-    projections and per-step message transforms.
+    def __init__(
+        self,
+        phys_dim: int,
+        up_dim: int,
+        down_dim: int,
+        left_dim: int,
+        right_dim: int,
+        eps: float = 1e-8,
+    ) -> None:
+        super().__init__()
+        self.eps = eps
+        self.base = nn.Parameter(torch.randn(phys_dim, up_dim, down_dim, left_dim, right_dim) * 0.02)
+        self.log_scale = nn.Parameter(torch.zeros(()))
+
+    def forward(self) -> torch.Tensor:
+        norm = self.base.reshape(-1).norm(p=2) + self.eps
+        return torch.exp(self.log_scale) * (self.base / norm)
+
+
+class PEPSBridge(nn.Module):
+    """Exact 4x4 PEPS bridge.
+
+    The contraction follows the requested topology: first each of the four
+    columns is contracted vertically, reducing the 4x4 lattice to four column
+    tensors; then those four tensors are contracted horizontally. Local site
+    values are computed by inserting a Z/X observable at one physical site at
+    a time.
     """
+
+    ROWS = 4
+    COLS = 4
+    N_SITES = ROWS * COLS
+    MAX_BOND_DIM = 8
 
     def __init__(
         self,
         feature_dim: int = 512,
-        n_sites: int = 8,
-        bond_dim: int = 32,
+        n_sites: int = N_SITES,
+        bond_dim: int = MAX_BOND_DIM,
         phys_dim: int = 2,
         hidden_dim: int = 128,
         temperature: float = 1.0,
-        n_message_passing_steps: int = 3,
-        grid_rows: Optional[int] = None,
-        grid_cols: Optional[int] = None,
         eps: float = 1e-8,
     ) -> None:
         super().__init__()
-        if feature_dim % n_sites:
-            raise ValueError("feature_dim must be divisible by n_sites.")
+        if n_sites != self.N_SITES:
+            print(f"[PEPS] Exact topology is fixed to 4x4 ({self.N_SITES} sites); ignoring n_sites={n_sites}.")
+        if bond_dim < 1:
+            raise ValueError(f"bond_dim must be >= 1, got {bond_dim}.")
+        if feature_dim % self.N_SITES:
+            raise ValueError(f"feature_dim must be divisible by {self.N_SITES} PEPS sites.")
+        if bond_dim > self.MAX_BOND_DIM:
+            print(f"[PEPS] Exact contraction supports bond_dim <= {self.MAX_BOND_DIM}; using {self.MAX_BOND_DIM}.")
+            bond_dim = self.MAX_BOND_DIM
 
-        self.Q = n_sites
+        self.Q = self.N_SITES
         self.D = bond_dim
         self.P = phys_dim
         self.hidden_dim = hidden_dim
-        self.Fps = feature_dim // n_sites
+        self.Fps = feature_dim // self.Q
         self.temperature = temperature
-        self.n_steps = max(1, int(n_message_passing_steps))
         self.eps = eps
-        self.rows, self.cols = _factor_grid(n_sites, grid_rows, grid_cols)
 
-        # Per-site encoders
         self.ln = nn.ModuleList([nn.LayerNorm(self.Fps) for _ in range(self.Q)])
         self.fc1 = nn.ModuleList([nn.Linear(self.Fps, hidden_dim) for _ in range(self.Q)])
         self.fc_logits = nn.ModuleList([nn.Linear(hidden_dim, self.P) for _ in range(self.Q)])
         self.fc_gate = nn.ModuleList([nn.Linear(hidden_dim, 1) for _ in range(self.Q)])
 
-        # Directional bond dimensions (boundary = 1)
         self.up_d, self.dn_d, self.lt_d, self.rt_d = [], [], [], []
+        cores = []
         for i in range(self.Q):
-            r, c = divmod(i, self.cols)
+            r, c = divmod(i, self.COLS)
             self.up_d.append(1 if r == 0 else self.D)
-            self.dn_d.append(1 if r == self.rows - 1 else self.D)
+            self.dn_d.append(1 if r == self.ROWS - 1 else self.D)
             self.lt_d.append(1 if c == 0 else self.D)
-            self.rt_d.append(1 if c == self.cols - 1 else self.D)
-
-        # Directional projections from hidden_dim
-        self.up_proj = nn.ModuleList([nn.Linear(hidden_dim, self.up_d[i], bias=False) for i in range(self.Q)])
-        self.dn_proj = nn.ModuleList([nn.Linear(hidden_dim, self.dn_d[i], bias=False) for i in range(self.Q)])
-        self.lt_proj = nn.ModuleList([nn.Linear(hidden_dim, self.lt_d[i], bias=False) for i in range(self.Q)])
-        self.rt_proj = nn.ModuleList([nn.Linear(hidden_dim, self.rt_d[i], bias=False) for i in range(self.Q)])
-
-        # Learnable message transforms per step
-        self.msg_transforms = nn.ModuleList()
-        for _ in range(self.n_steps):
-            step_tf = nn.ModuleList([nn.Linear(self.D, self.D, bias=False) for _ in range(4)])
-            for lt in step_tf:
-                nn.init.eye_(lt.weight)
-                lt.weight.data.mul_(0.9).add_(0.1 * torch.randn_like(lt.weight) * 0.02)
-            self.msg_transforms.append(step_tf)
-
-        self.env_weight_logits = nn.Parameter(torch.zeros(self.Q, 4))
-        self.env_proj = nn.ModuleList([nn.Linear(4, self.P * self.P) for _ in range(self.Q)])
+            self.rt_d.append(1 if c == self.COLS - 1 else self.D)
+            cores.append(
+                _PEPSSpectralCore(
+                    phys_dim,
+                    self.up_d[i],
+                    self.dn_d[i],
+                    self.lt_d[i],
+                    self.rt_d[i],
+                    eps,
+                )
+            )
+        self.cores = nn.ModuleList(cores)
 
         self.beta_logit = nn.Parameter(torch.zeros(self.Q))
         self.skip_proj = nn.Linear(feature_dim, self.Q)
@@ -276,114 +276,226 @@ class PEPSBridge(nn.Module):
         self.register_buffer("ObsZ", Z)
         self.register_buffer("ObsX", X)
 
-    # helpers
     def _idx(self, r: int, c: int) -> int:
-        return r * self.cols + c
+        return r * self.COLS + c
 
-    def _unit_msg(self, B: int, dim: int, dev, dt) -> torch.Tensor:
-        return _l2_normalize(torch.ones(B, dim, device=dev, dtype=dt), eps=self.eps)
-
-    @staticmethod
-    def _dot(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-        return (a * b).sum(-1, keepdim=True)
-
-    def _apply_tf(self, msg: torch.Tensor, tf: nn.Linear) -> torch.Tensor:
-        if msg.shape[-1] == 1:
-            return msg
-        return _l2_normalize(tf(msg), eps=self.eps)
-
-    # encode
-    def _encode(self, x: torch.Tensor):
+    def _encode(self, x: torch.Tensor) -> torch.Tensor:
         B = x.shape[0]
         chunks = x.view(B, self.Q, self.Fps)
-        amps, gates, hiddens = [], [], []
+        amps = []
         for i in range(self.Q):
             h = F.gelu(self.fc1[i](self.ln[i](chunks[:, i])))
-            hiddens.append(h)
             logits = self.fc_logits[i](h) / self.temperature
             a = torch.sqrt(F.softmax(logits, -1).clamp(min=self.eps))
-            amps.append(_l2_normalize(a, eps=self.eps))
-            gates.append(torch.sigmoid(self.fc_gate[i](h)).squeeze(-1))
-        return torch.stack(amps, 1), torch.stack(gates, 1), hiddens
+            gate = torch.sigmoid(self.fc_gate[i](h))
+            uniform = torch.full_like(a, 1.0 / math.sqrt(self.P))
+            amps.append(_l2_normalize(gate * a + (1.0 - gate) * uniform, eps=self.eps))
+        return torch.stack(amps, 1)
 
-    def _build_factors(self, amps, gates, hiddens):
-        dirs = {"up": [], "dn": [], "lt": [], "rt": []}
-        gated = []
+    def _contract_physical(
+        self,
+        amps: torch.Tensor,
+        cores: List[torch.Tensor],
+    ) -> List[torch.Tensor]:
+        return [torch.einsum("bp,pudlr->budlr", amps[:, i], cores[i]) for i in range(self.Q)]
+
+    def _observable_amps(self, amps: torch.Tensor) -> List[torch.Tensor]:
+        out = []
         for i in range(self.Q):
-            a = _l2_normalize(amps[:, i] * gates[:, i:i+1].clamp(min=self.eps), eps=self.eps)
-            gated.append(a)
-            h = hiddens[i]
-            for key, proj in [("up", self.up_proj), ("dn", self.dn_proj),
-                              ("lt", self.lt_proj), ("rt", self.rt_proj)]:
-                dirs[key].append(_l2_normalize(torch.tanh(proj[i](h)), eps=self.eps))
-        return dirs, gated
+            beta = torch.sigmoid(self.beta_logit[i])
+            obs = beta * self.ObsZ + (1.0 - beta) * self.ObsX
+            out.append(torch.einsum("bp,pq->bq", amps[:, i], obs))
+        return out
 
-    def _message_pass(self, factors, B, dev, dt):
-        in_u = [self._unit_msg(B, self.up_d[i], dev, dt) for i in range(self.Q)]
-        in_d = [self._unit_msg(B, self.dn_d[i], dev, dt) for i in range(self.Q)]
-        in_l = [self._unit_msg(B, self.lt_d[i], dev, dt) for i in range(self.Q)]
-        in_r = [self._unit_msg(B, self.rt_d[i], dev, dt) for i in range(self.Q)]
+    def _contract_column_single(self, col_tensors: List[torch.Tensor]) -> torch.Tensor:
+        return torch.einsum(
+            "acde,cfgh,fijk,ilmn->dgjmehkn",
+            col_tensors[0],
+            col_tensors[1],
+            col_tensors[2],
+            col_tensors[3],
+        )
 
-        for step in range(self.n_steps):
-            tf = self.msg_transforms[step]
-            o_u, o_d, o_l, o_r = [], [], [], []
-            for i in range(self.Q):
-                u, d, l, r = factors["up"][i], factors["dn"][i], factors["lt"][i], factors["rt"][i]
-                du, dd, dl, dr = self._dot(d, in_d[i]), self._dot(u, in_u[i]), self._dot(l, in_l[i]), self._dot(r, in_r[i])
-                o_u.append(_l2_normalize(u * dd * dl * dr, eps=self.eps))
-                o_d.append(_l2_normalize(d * du * dl * dr, eps=self.eps))
-                o_l.append(_l2_normalize(l * du * dd * dr, eps=self.eps))
-                o_r.append(_l2_normalize(r * du * dd * dl, eps=self.eps))
+    def _contract_all_columns_single(self, columns: List[torch.Tensor]) -> torch.Tensor:
+        left = torch.einsum("abcdefgh,efghijkl->ijkl", columns[0], columns[1])
+        left = torch.einsum("ijkl,ijklmnop->mnop", left, columns[2])
+        return torch.einsum("mnop,mnopqrst->", left, columns[3])
 
-            nu = [None] * self.Q
-            nd = [None] * self.Q
-            nl = [None] * self.Q
-            nr = [None] * self.Q
-            for rr in range(self.rows):
-                for cc in range(self.cols):
-                    i = self._idx(rr, cc)
-                    nu[i] = self._apply_tf(o_d[self._idx(rr-1, cc)], tf[0]) if rr > 0 else self._unit_msg(B, self.up_d[i], dev, dt)
-                    nd[i] = self._apply_tf(o_u[self._idx(rr+1, cc)], tf[1]) if rr < self.rows - 1 else self._unit_msg(B, self.dn_d[i], dev, dt)
-                    nl[i] = self._apply_tf(o_r[self._idx(rr, cc-1)], tf[2]) if cc > 0 else self._unit_msg(B, self.lt_d[i], dev, dt)
-                    nr[i] = self._apply_tf(o_l[self._idx(rr, cc+1)], tf[3]) if cc < self.cols - 1 else self._unit_msg(B, self.rt_d[i], dev, dt)
-            in_u, in_d, in_l, in_r = nu, nd, nl, nr
+    def _column_from_sites_single(
+        self,
+        site_tensors: List[torch.Tensor],
+        col: int,
+        replacement: Optional[Tuple[int, torch.Tensor]] = None,
+    ) -> torch.Tensor:
+        tensors = [site_tensors[self._idx(row, col)] for row in range(self.ROWS)]
+        if replacement is not None:
+            row, tensor = replacement
+            tensors[row] = tensor
+        return self._contract_column_single(tensors)
 
-        return in_u, in_d, in_l, in_r
+    def _exact_expectations(
+        self,
+        site_tensors: List[torch.Tensor],
+        obs_site_tensors: List[torch.Tensor],
+    ) -> torch.Tensor:
+        B = site_tensors[0].shape[0]
+        batch_outputs = []
+
+        for b in range(B):
+            sample_sites = [tensor[b] for tensor in site_tensors]
+            base_columns = [self._column_from_sites_single(sample_sites, col) for col in range(self.COLS)]
+            denom = self._contract_all_columns_single(base_columns).abs().clamp_min(self.eps)
+
+            outputs = []
+            for site in range(self.Q):
+                row, col = divmod(site, self.COLS)
+                columns = list(base_columns)
+                columns[col] = self._column_from_sites_single(
+                    sample_sites,
+                    col,
+                    replacement=(row, obs_site_tensors[site][b]),
+                )
+                outputs.append(self._contract_all_columns_single(columns) / denom)
+
+            batch_outputs.append(torch.stack(outputs))
+
+        return torch.tanh(torch.stack(batch_outputs, 0))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        amps, gates, hiddens = self._encode(x)
-        factors, gated = self._build_factors(amps, gates, hiddens)
-        B = x.shape[0]
-        in_u, in_d, in_l, in_r = self._message_pass(factors, B, x.device, x.dtype)
-
-        outputs = []
-        for i in range(self.Q):
-            a = gated[i]
-            scores = torch.stack([
-                self._dot(factors["up"][i], in_u[i]).squeeze(-1),
-                self._dot(factors["dn"][i], in_d[i]).squeeze(-1),
-                self._dot(factors["lt"][i], in_l[i]).squeeze(-1),
-                self._dot(factors["rt"][i], in_r[i]).squeeze(-1),
-            ], -1)
-            w = F.softmax(self.env_weight_logits[i].unsqueeze(0) + scores, dim=-1)
-            env_vec = w * scores
-            env_mat = self.env_proj[i](env_vec).view(B, self.P, self.P)
-            env_mat = 0.5 * (env_mat + env_mat.transpose(-1, -2))
-            env_mat = env_mat + torch.eye(self.P, device=env_mat.device).unsqueeze(0)
-
-            beta = torch.sigmoid(self.beta_logit[i])
-            O = beta * self.ObsZ + (1 - beta) * self.ObsX
-            eff = torch.einsum("bpq,qr->bpr", env_mat, O)
-            outputs.append(torch.einsum("bp,bpq,bq->b", a, eff, a))
-
-        z = torch.stack(outputs, 1)
+        amps = self._encode(x)
+        cores = [core() for core in self.cores]
+        site_tensors = self._contract_physical(amps, cores)
+        obs_site_tensors = self._contract_physical(torch.stack(self._observable_amps(amps), 1), cores)
+        z = self._exact_expectations(site_tensors, obs_site_tensors)
         z_skip = torch.tanh(self.skip_proj(x)) * self.site_scale
         alpha = torch.sigmoid(self.mix_logit)
-        return alpha * z + (1 - alpha) * z_skip + self.bias
+        return alpha * z + (1.0 - alpha) * z_skip + self.bias
 
 
-# ── PennyLane quantum layer ──────────────────────────────────────────────
+class _TTNCore(nn.Module):
+    """Single TTN contraction tensor with Frobenius-normalised base."""
 
+    def __init__(self, left_dim: int, right_dim: int, parent_dim: int, eps: float = 1e-8) -> None:
+        super().__init__()
+        self.eps = eps
+        self.base = nn.Parameter(torch.randn(left_dim, right_dim, parent_dim) * 0.02)
+        self.log_scale = nn.Parameter(torch.zeros(()))
+
+    def forward(self) -> torch.Tensor:
+        norm = self.base.reshape(-1).norm(p=2) + self.eps
+        return torch.exp(self.log_scale) * (self.base / norm)
+
+
+class TTNBridge(nn.Module):
+    """Hierarchical binary-tree TTN bridge with a fixed 16-leaf layout.
+
+    The bridge mirrors the diagrammed TTN:
+    1. split features into 16 leaves;
+    2. encode each leaf into a local physical state;
+    3. contract adjacent pairs bottom-up through TTN cores;
+    4. stop when ``n_sites`` final states remain and measure each state.
+    """
+
+    N_LEAVES = 16
+    VALID_OUTPUTS = (1, 2, 4, 8)
+
+    def __init__(
+        self,
+        feature_dim: int = 512,
+        n_sites: int = 8,
+        bond_dim: int = 32,
+        phys_dim: int = 2,
+        hidden_dim: int = 128,
+        temperature: float = 1.0,
+        eps: float = 1e-8,
+    ) -> None:
+        super().__init__()
+        if feature_dim % self.N_LEAVES:
+            raise ValueError(f"feature_dim must be divisible by {self.N_LEAVES} TTN leaves.")
+        if bond_dim < 1:
+            raise ValueError(f"bond_dim must be >= 1, got {bond_dim}.")
+        if n_sites not in self.VALID_OUTPUTS:
+            raise ValueError(
+                f"TTN uses a fixed {self.N_LEAVES}-leaf tree; n_sites must be one of {self.VALID_OUTPUTS}, got {n_sites}."
+            )
+
+        self.Q = n_sites
+        self.D = bond_dim
+        self.P = phys_dim
+        self.hidden_dim = hidden_dim
+        self.temperature = temperature
+        self.eps = eps
+        self.Fpl = feature_dim // self.N_LEAVES
+
+        self.ln = nn.ModuleList([nn.LayerNorm(self.Fpl) for _ in range(self.N_LEAVES)])
+        self.fc1 = nn.ModuleList([nn.Linear(self.Fpl, hidden_dim) for _ in range(self.N_LEAVES)])
+        self.fc_logits = nn.ModuleList([nn.Linear(hidden_dim, self.P) for _ in range(self.N_LEAVES)])
+        self.fc_gate = nn.ModuleList([nn.Linear(hidden_dim, 1) for _ in range(self.N_LEAVES)])
+
+        levels = []
+        child_dim = self.P
+        n_children = self.N_LEAVES
+        while n_children > self.Q:
+            n_parents = n_children // 2
+            levels.append(nn.ModuleList([
+                _TTNCore(child_dim, child_dim, self.D, eps) for _ in range(n_parents)
+            ]))
+            n_children = n_parents
+            child_dim = self.D
+        self.levels = nn.ModuleList(levels)
+
+        self.beta_logit = nn.Parameter(torch.zeros(self.Q))
+        self.skip_proj = nn.Linear(feature_dim, self.Q)
+        self.site_scale = nn.Parameter(torch.ones(self.Q))
+        self.mix_logit = nn.Parameter(torch.zeros(()))
+        self.bias = nn.Parameter(torch.zeros(self.Q))
+
+        Z, X = _generalized_ZX(self.D)
+        self.register_buffer("ObsZ", Z)
+        self.register_buffer("ObsX", X)
+
+    def _encode(self, x: torch.Tensor) -> torch.Tensor:
+        B = x.shape[0]
+        chunks = x.view(B, self.N_LEAVES, self.Fpl)
+        leaves = []
+        for i in range(self.N_LEAVES):
+            h = F.gelu(self.fc1[i](self.ln[i](chunks[:, i])))
+            logits = self.fc_logits[i](h) / self.temperature
+            amp = torch.sqrt(F.softmax(logits, dim=-1).clamp(min=self.eps))
+            gate = torch.sigmoid(self.fc_gate[i](h))
+            uniform = torch.full_like(amp, 1.0 / math.sqrt(self.P))
+            leaves.append(_l2_normalize(gate * amp + (1.0 - gate) * uniform, eps=self.eps))
+        return torch.stack(leaves, 1)
+
+    def _contract_level(self, states: torch.Tensor, cores: nn.ModuleList) -> torch.Tensor:
+        left = states[:, 0::2]
+        right = states[:, 1::2]
+        core_stack = torch.stack([core() for core in cores], 0)
+        parents = torch.einsum("bnl,bnr,nlrd->bnd", left, right, core_stack)
+        return _l2_normalize(parents, eps=self.eps)
+
+    def _bottom_up(self, leaves: torch.Tensor) -> torch.Tensor:
+        states = leaves
+        for level in self.levels:
+            states = self._contract_level(states, level)
+        return states
+
+    def _measure(self, states: torch.Tensor) -> torch.Tensor:
+        z = torch.einsum("bqd,df,bqf->bq", states, self.ObsZ, states)
+        x = torch.einsum("bqd,df,bqf->bq", states, self.ObsX, states)
+        beta = torch.sigmoid(self.beta_logit).unsqueeze(0)
+        return beta * z + (1.0 - beta) * x
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        leaves = self._encode(x)
+        final_states = self._bottom_up(leaves)
+        z_ttn = self._measure(final_states)
+        z_skip = torch.tanh(self.skip_proj(x)) * self.site_scale
+        alpha = torch.sigmoid(self.mix_logit)
+        return alpha * z_ttn + (1.0 - alpha) * z_skip + self.bias
+
+
+# -- PennyLane quantum layer ------------------------------------------------
 
 class PennyLaneQuantumLayer(nn.Module):
     """Variational quantum circuit: RX(inputs) → [RX/RY/RZ + ring CNOT]×L → ⟨Z⟩."""
@@ -534,13 +646,19 @@ class HybridTNClassifier(nn.Module):
         freeze_resnet: bool = True,
         use_pennylane: bool = True,
         bridge_type: str = "mps",
-        peps_rows: Optional[int] = None,
-        peps_cols: Optional[int] = None,
-        peps_message_passing_steps: int = 3,
         backbone: str = "resnet18",
         backbone_weights: Optional[str] = None,
     ) -> None:
         super().__init__()
+        bridge_type = bridge_type.lower().strip()
+        if bridge_type == "peps" and n_qubits != PEPSBridge.N_SITES:
+            print(f"[PEPS] Using fixed 4x4 topology ({PEPSBridge.N_SITES} sites); ignoring n_qubits={n_qubits}.")
+            n_qubits = PEPSBridge.N_SITES
+        if bridge_type == "ttn" and n_qubits not in TTNBridge.VALID_OUTPUTS:
+            raise ValueError(
+                f"TTN uses a fixed {TTNBridge.N_LEAVES}-leaf tree; choose n_qubits from {TTNBridge.VALID_OUTPUTS}."
+            )
+
         self.n_classes = n_classes
         self.n_qubits = n_qubits
 
@@ -554,15 +672,12 @@ class HybridTNClassifier(nn.Module):
                 f"Try one of {valid}."
             )
 
-        bridge_type = bridge_type.lower().strip()
         if bridge_type == "mps":
             self.tn_bridge = MPSBridge(feat_dim, n_qubits, mps_bond_dim, mps_phys_dim, bridge_hidden_dim)
         elif bridge_type == "peps":
-            self.tn_bridge = PEPSBridge(
-                feat_dim, n_qubits, mps_bond_dim, mps_phys_dim, bridge_hidden_dim,
-                n_message_passing_steps=peps_message_passing_steps,
-                grid_rows=peps_rows, grid_cols=peps_cols,
-            )
+            self.tn_bridge = PEPSBridge(feat_dim, n_qubits, mps_bond_dim, mps_phys_dim, bridge_hidden_dim)
+        elif bridge_type == "ttn":
+            self.tn_bridge = TTNBridge(feat_dim, n_qubits, mps_bond_dim, mps_phys_dim, bridge_hidden_dim)
         else:
             raise ValueError(f"Unknown bridge_type '{bridge_type}'.")
 
@@ -598,9 +713,6 @@ def hybrid_tn_model(
     freeze_resnet: bool = True,
     use_pennylane: bool = True,
     tn_bridge: str = "mps",
-    peps_rows: Optional[int] = None,
-    peps_cols: Optional[int] = None,
-    peps_message_passing_steps: int = 3,
     backbone: str = "resnet18",
     backbone_weights: Optional[str] = None,
 ) -> HybridTNClassifier:
@@ -615,9 +727,6 @@ def hybrid_tn_model(
         freeze_resnet=freeze_resnet,
         use_pennylane=use_pennylane,
         bridge_type=tn_bridge,
-        peps_rows=peps_rows,
-        peps_cols=peps_cols,
-        peps_message_passing_steps=peps_message_passing_steps,
         backbone=backbone,
         backbone_weights=backbone_weights,
     )

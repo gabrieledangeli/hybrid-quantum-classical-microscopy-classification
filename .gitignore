@@ -35,6 +35,7 @@ Desktop.ini
 /logs/
 /plots/
 /output*/
+/report/
 
 # ── Experiment tracking ─────────────────────────────────────────────────
 wandb/
