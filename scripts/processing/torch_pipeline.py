@@ -12,7 +12,7 @@ try:
 except ImportError:
     smp = None
 
-# ── Constant kernels / matrices ───────────────────────────────────────────
+# -- Constant kernels / matrices -------------------------------------------
 
 K_G = torch.tensor([[0, 1, 0], [1, 4, 1], [0, 1, 0]], dtype=torch.float32) / 4
 K_RB = torch.tensor([[1, 2, 1], [2, 4, 2], [1, 2, 1]], dtype=torch.float32) / 4
@@ -42,7 +42,7 @@ K_SHARP = torch.tensor([[0, -1, 0], [-1, 5, -1], [0, -1, 0]], dtype=torch.float3
 _DEFAULT_CAMERA = ([0., 0., 0., 0.], [1., 1., 1.], [1., 0., 0., 0., 1., 0., 0., 0., 1.])
 
 
-# ── Bayer → RGB helper ────────────────────────────────────────────────────
+# -- Bayer -> RGB helper ----------------------------------------------------
 
 
 def raw2rgb(
@@ -96,7 +96,7 @@ def raw2rgb(
     return rgb
 
 
-# ── Debayer conv layer ────────────────────────────────────────────────────
+# -- Debayer conv layer ----------------------------------------------------
 
 
 class _Debayer(nn.Conv2d):
@@ -110,7 +110,7 @@ class _Debayer(nn.Conv2d):
         self.weight.data[2, 2] = K_RB.clone()
 
 
-# ── Simple mosaic → RGB ──────────────────────────────────────────────────
+# -- Simple mosaic -> RGB --------------------------------------------------
 
 
 class RawToRGB(nn.Module):
@@ -152,11 +152,11 @@ class RawToRGB(nn.Module):
         return rgb
 
 
-# ── Neural-network processor ─────────────────────────────────────────────
+# -- Neural-network processor ---------------------------------------------
 
 
 class NNProcessing(nn.Module):
-    """U-Net++ based RAW → RGB processor.
+    """U-Net++ based RAW -> RGB processor.
 
     Requires ``segmentation-models-pytorch``.
     """
@@ -201,13 +201,13 @@ class NNProcessing(nn.Module):
         return rgb
 
 
-# ── Parametrised differentiable pipeline ──────────────────────────────────
+# -- Parametrised differentiable pipeline ----------------------------------
 
 
 class ParametrizedProcessing(nn.Module):
     """Fully differentiable processing pipeline with learnable camera params.
 
-    Steps: mosaic → debayer → WB → CC → sharpen → blur → gamma [→ BN].
+    Steps: mosaic -> debayer -> WB -> CC -> sharpen -> blur -> gamma [-> BN].
     """
 
     def __init__(

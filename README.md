@@ -2,7 +2,7 @@
 
 **Hybrid Quantum-Classical Convolutional Neural Network for Large-Scale Medical Image Classification**
 
-A research framework that combines classical deep learning (ResNet) with quantum-inspired tensor networks (MPS, PEPS) and variational quantum circuits (VQC) for the classification of microscopy blood-cell images — specifically the Matek *et al.* leukocyte morphology dataset.
+A research framework that combines classical deep learning (ResNet) with quantum-inspired tensor networks (MPS, PEPS) and variational quantum circuits (VQC) for the classification of microscopy blood-cell images - specifically the Matek *et al.* leukocyte morphology dataset.
 
 ---
 
@@ -28,11 +28,11 @@ This project investigates whether **tensor-network (TN) bridges** and **variatio
 
 | Feature | Description |
 |---|---|
-| **Multiple classifiers** | ResNet-18/34/50 (pure) and Hybrid TN (ResNet → MPS/PEPS → VQC → head) |
+| **Multiple classifiers** | ResNet-18/34/50 (pure) and Hybrid TN (ResNet -> MPS/PEPS -> VQC -> head) |
 | **RAW image processing** | Static (NumPy), parametrised (differentiable PyTorch), and neural-network (U-Net++) pipelines |
 | **Class-imbalance handling** | Weighted loss (Effective Number of Samples), weighted random sampling, soft undersampling with warm-up, conditional augmentation for rare classes |
 | **Cross-validation** | Stratified K-Fold and Stratified Shuffle-Split |
-| **Quantum simulation** | PennyLane with automatic backend selection (`lightning.gpu` → `lightning.qubit` → `default.qubit`) and classical MLP fallback |
+| **Quantum simulation** | PennyLane with automatic backend selection (`lightning.gpu` -> `lightning.qubit` -> `default.qubit`) and classical MLP fallback |
 | **Experiment tracking** | Weights & Biases integration (metrics, confusion matrices, per-class stats, gradient tracking) |
 
 ---
@@ -40,40 +40,40 @@ This project investigates whether **tensor-network (TN) bridges** and **variatio
 ## Architecture
 
 ```
-                    ┌──────────────┐
-   RAW image ──────►│  Processor   │──► RGB
-                    │ (static /    │
-                    │  param / NN) │
-                    └──────┬───────┘
-                           │
-                    ┌──────▼───────┐
-                    │ Augmentation  │   (weak / strong / conditional)
-                    └──────┬───────┘
-                           │
-                    ┌──────▼───────┐
-                    │ Normalisation │   (channel-wise μ/σ)
-                    └──────┬───────┘
-                           │
-              ┌────────────▼────────────┐
-              │       Classifier        │
-              │                         │
-              │  ┌─────────────────┐    │
-              │  │  ResNet Backbone │    │
-              │  └────────┬────────┘    │
-              │           │             │
-              │  ┌────────▼────────┐    │
-              │  │   TN Bridge     │    │  (MPS or PEPS)
-              │  └────────┬────────┘    │
-              │           │             │
-              │  ┌────────▼────────┐    │
-              │  │   VQC / MLP     │    │  (PennyLane or classical)
-              │  └────────┬────────┘    │
-              │           │             │
-              │  ┌────────▼────────┐    │
-              │  │   BN → Linear   │    │
-              │  └─────────────────┘    │
-              └─────────────────────────┘
-                           │
+                    +--------------+
+   RAW image ------>|  Processor   |--> RGB
+                    | (static /    |
+                    |  param / NN) |
+                    +------+-------+
+                           |
+                    +------v-------+
+                    | Augmentation  |   (weak / strong / conditional)
+                    +------+-------+
+                           |
+                    +------v-------+
+                    | Normalisation |   (channel-wise mu/sigma)
+                    +------+-------+
+                           |
+              +------------v------------+
+              |       Classifier        |
+              |                         |
+              |  +-----------------+    |
+              |  |  ResNet Backbone |    |
+              |  +--------+--------+    |
+              |           |             |
+              |  +--------v--------+    |
+              |  |   TN Bridge     |    |  (MPS or PEPS)
+              |  +--------+--------+    |
+              |           |             |
+              |  +--------v--------+    |
+              |  |   VQC / MLP     |    |  (PennyLane or classical)
+              |  +--------+--------+    |
+              |           |             |
+              |  +--------v--------+    |
+              |  |   BN -> Linear   |    |
+              |  +-----------------+    |
+              +-------------------------+
+                           |
                         logits
 ```
 
@@ -83,34 +83,34 @@ This project investigates whether **tensor-network (TN) bridges** and **variatio
 
 ```
 HQCNNxLargeScaleMedicalImages/
-├── README.md
-├── LICENSE
-├── requirements.txt
-├── notebooks/
-│   └── microscopy_dataset_analysis.ipynb
-└── scripts/
-    ├── __init__.py
-    ├── config.py               # CLI argument definitions
-    ├── train.py                # Training entry-point
-    ├── data/
-    │   ├── __init__.py
-    │   ├── augmentation.py     # Augmentation pipelines & seeding
-    │   ├── dataset.py          # Dataset classes (RAW & RGB)
-    │   └── utils.py            # I/O, CV splits, sampling helpers
-    ├── models/
-    │   ├── __init__.py
-    │   ├── classifiers.py      # ResNet factory, EndToEndModel, TensorNormalize
-    │   ├── hybrid.py           # MPS/PEPS bridges, VQC, HybridTNClassifier
-    │   └── losses.py           # Focal Loss
-    ├── processing/
-    │   ├── __init__.py
-    │   ├── numpy_pipeline.py   # Non-differentiable RAW→RGB (NumPy/SciPy)
-    │   └── torch_pipeline.py   # Differentiable RAW→RGB (PyTorch)
-    └── utils/
-        ├── __init__.py
-        ├── conversions.py      # np ↔ torch tensor helpers
-        ├── metrics.py          # Multi-class classification metrics
-        └── visualization.py    # Tensor saving & image grid export
++-- README.md
++-- LICENSE
++-- requirements.txt
++-- notebooks/
+|   +-- microscopy_dataset_analysis.ipynb
++-- scripts/
+    +-- __init__.py
+    +-- config.py               # CLI argument definitions
+    +-- train.py                # Training entry-point
+    +-- data/
+    |   +-- __init__.py
+    |   +-- augmentation.py     # Augmentation pipelines & seeding
+    |   +-- dataset.py          # Dataset classes (RAW & RGB)
+    |   +-- utils.py            # I/O, CV splits, sampling helpers
+    +-- models/
+    |   +-- __init__.py
+    |   +-- classifiers.py      # ResNet factory, EndToEndModel, TensorNormalize
+    |   +-- hybrid.py           # MPS/PEPS bridges, VQC, HybridTNClassifier
+    |   +-- losses.py           # Focal Loss
+    +-- processing/
+    |   +-- __init__.py
+    |   +-- numpy_pipeline.py   # Non-differentiable RAW->RGB (NumPy/SciPy)
+    |   +-- torch_pipeline.py   # Differentiable RAW->RGB (PyTorch)
+    +-- utils/
+        +-- __init__.py
+        +-- conversions.py      # np <-> torch tensor helpers
+        +-- metrics.py          # Multi-class classification metrics
+        +-- visualization.py    # Tensor saving & image grid export
 ```
 
 ---
@@ -119,7 +119,7 @@ HQCNNxLargeScaleMedicalImages/
 
 ### Prerequisites
 
-- Python ≥ 3.10
+- Python >= 3.10
 - CUDA-capable GPU recommended (but CPU training is supported)
 
 ### Steps
@@ -143,7 +143,7 @@ pip install -r requirements.txt
 ### Optional: faster quantum simulation
 
 ```bash
-pip install pennylane-lightning          # CPU adjoint (5-20× faster)
+pip install pennylane-lightning          # CPU adjoint (5-20x faster)
 pip install pennylane-lightning[gpu]     # GPU adjoint (requires CUDA)
 ```
 
@@ -155,15 +155,15 @@ The framework expects a **Matek *et al.* microscopy dataset** organised as follo
 
 ```
 data/
-├── images/
-│   ├── raw_scale100/      # 16-bit RAW Bayer TIFF images
-│   │   ├── <filename>.tiff
-│   │   └── ...
-│   └── rgb_scale100/      # Pre-processed 16-bit RGB TIFF images
-│       ├── <filename>.tiff
-│       └── ...
-└── labels/
-    └── Ma190c_annotations.dat   # <stem> <CLASS> per line
++-- images/
+|   +-- raw_scale100/      # 16-bit RAW Bayer TIFF images
+|   |   +-- <filename>.tiff
+|   |   +-- ...
+|   +-- rgb_scale100/      # Pre-processed 16-bit RGB TIFF images
+|       +-- <filename>.tiff
+|       +-- ...
++-- labels/
+    +-- Ma190c_annotations.dat   # <stem> <CLASS> per line
 ```
 
 Pass `--data_dir ./data` (or the actual path) when launching training.
@@ -202,7 +202,6 @@ python -m scripts.train \
     --tn_bridge mps \
     --n_qubits 8 \
     --vqc_layers 2 \
-    --use_pennylane \
     --freeze_resnet_backbone \
     --epochs 30
 ```
@@ -250,7 +249,7 @@ Run `python -m scripts.train --help` for the full list. Key groups:
 | **Augmentation** | `--augmentation`, `--conditional_augmentation`, `--rare_class_threshold` |
 | **Training** | `--batch_size`, `--lr`, `--lr_head`, `--epochs`, `--loss_fn`, `--focal_gamma` |
 | **Classifier** | `--classifier_network`, `--classifier_pretrained`, `--freeze_resnet_backbone` |
-| **Hybrid TN** | `--n_qubits`, `--mps_bond_dim`, `--tn_bridge`, `--vqc_layers`, `--use_pennylane` |
+| **Hybrid TN** | `--n_qubits`, `--tn_bond_dim`, `--tn_phys_dim`, `--tn_hidden_dim`, `--tn_bridge`, `--vqc_layers` |
 | **W&B** | `--wandb_project`, `--wandb_entity`, `--run_name`, `--wandb_watch` |
 
 ---

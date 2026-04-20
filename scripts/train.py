@@ -1,10 +1,10 @@
 """Training entry-point for the Hybrid Quantum-Classical CNN pipeline.
 
-Usage::
+Usage:
 
     python -m scripts.train --dataset Microscopy --data_dir ./data --epochs 30
 
-Or from the ``scripts/`` directory::
+Or from the ``scripts/`` directory:
 
     python train.py --dataset Microscopy --data_dir ./data --epochs 30
 """
@@ -28,7 +28,7 @@ from tqdm import tqdm
 
 import wandb
 
-# ── Local imports ─────────────────────────────────────────────────────────
+# -- Local imports ---------------------------------------------------------
 # Support both `python -m scripts.train` and direct `python train.py`
 try:
     from scripts.config import parse_args
@@ -71,16 +71,16 @@ except ImportError:
     )
     from utils.metrics import compute_metrics
 
-# ── Device ────────────────────────────────────────────────────────────────
+# -- Device ----------------------------------------------------------------
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 if torch.cuda.is_available():
     torch.backends.cudnn.benchmark = True
 
 
-# ═══════════════════════════════════════════════════════════════════════════
+# ===========================================================================
 #  Training / Validation loops
-# ═══════════════════════════════════════════════════════════════════════════
+# ===========================================================================
 
 
 def train_one_epoch(
@@ -159,9 +159,9 @@ def validate(
     return avg_loss, metrics
 
 
-# ═══════════════════════════════════════════════════════════════════════════
+# ===========================================================================
 #  Building blocks helpers
-# ═══════════════════════════════════════════════════════════════════════════
+# ===========================================================================
 
 
 def _build_processor(args, dataset):
@@ -199,13 +199,12 @@ def _build_classifier(args, n_classes: int):
         return hybrid_tn_model(
             fc_out_features=n_classes,
             n_qubits=args.n_qubits,
-            mps_bond_dim=args.mps_bond_dim,
-            mps_phys_dim=args.mps_phys_dim,
-            mps_hidden_dim=args.mps_hidden_dim,
+            tn_bond_dim=args.tn_bond_dim,
+            tn_phys_dim=args.tn_phys_dim,
+            tn_hidden_dim=args.tn_hidden_dim,
             tn_bridge=args.tn_bridge,
             vqc_layers=args.vqc_layers,
             freeze_resnet=args.freeze_resnet_backbone,
-            use_pennylane=args.use_pennylane,
             backbone=args.backbone,
             backbone_weights=args.backbone_weights,
         )
@@ -286,15 +285,15 @@ def _build_scheduler(args, optimizer):
     return cosine
 
 
-# ═══════════════════════════════════════════════════════════════════════════
+# ===========================================================================
 #  Main training routine
-# ═══════════════════════════════════════════════════════════════════════════
+# ===========================================================================
 
 
 def run_train(args: argparse.Namespace) -> None:
     """Execute the full cross-validated training loop."""
 
-    # ── 1. Dataset ────────────────────────────────────────────────────────
+    # -- 1. Dataset --------------------------------------------------------
     dataset = get_dataset(
         args.dataset, root_dir=args.data_dir,
         min_samples_per_class=args.min_samples_per_class,
@@ -309,7 +308,7 @@ def run_train(args: argparse.Namespace) -> None:
     if hasattr(dataset, "classes"):
         print(f"  Final classes: {dataset.classes}")
 
-    # ── 2. Reproducibility ────────────────────────────────────────────────
+    # -- 2. Reproducibility ------------------------------------------------
     set_global_seed(args.seed)
 
     # Validate ranges
@@ -318,7 +317,7 @@ def run_train(args: argparse.Namespace) -> None:
     if not 0.0 <= args.undersample_strength <= 1.0:
         raise ValueError(f"--undersample_strength must be in [0, 1], got {args.undersample_strength}")
 
-    # ── 3. CV splits ──────────────────────────────────────────────────────
+    # -- 3. CV splits ------------------------------------------------------
     splits = k_fold(dataset, args.n_splits, args.seed, args.train_size, args.cv_strategy)
 
     for fold, (train_idx, val_idx) in enumerate(splits):
@@ -337,7 +336,7 @@ def run_train(args: argparse.Namespace) -> None:
             config=config,
         )
 
-        class_names: List[str] = list(getattr(dataset, "classes", sorted(set(dataset.labels))))
+        class_names = list(getattr(dataset, "classes", sorted(set(dataset.labels))))
         n_classes = len(class_names)
         train_labels = [dataset.labels[i] for i in train_idx]
         class_counts = Counter(train_labels)
@@ -349,7 +348,7 @@ def run_train(args: argparse.Namespace) -> None:
         for cn in class_names:
             print(f"  {cn:>6s}: train={tc[cn]:4d} | val={vc[cn]:4d}")
 
-        # ── Build pipeline components ─────────────────────────────────────
+        # -- Build pipeline components -------------------------------------
         processor, normalization = _build_processor(args, dataset)
         classifier = _build_classifier(args, n_classes)
 
@@ -368,12 +367,12 @@ def run_train(args: argparse.Namespace) -> None:
             freeze_processor=args.freeze_processor,
         ).to(DEVICE)
 
-        # ── Loss / Optimizer / Scheduler ──────────────────────────────────
+        # -- Loss / Optimizer / Scheduler ----------------------------------
         criterion = _build_criterion(args, class_counts, n_classes, DEVICE)
         optimizer = _build_optimizer(args, model)
         scheduler = _build_scheduler(args, optimizer)
 
-        # ── Sampler ───────────────────────────────────────────────────────
+        # -- Sampler -------------------------------------------------------
         use_sampler = args.imbalance_handling in ("sampler", "both")
         dynamic_soft = False
         sampler = None
@@ -393,7 +392,7 @@ def run_train(args: argparse.Namespace) -> None:
                 ])
                 sampler = WeightedRandomSampler(sw, len(train_idx), replacement=True)
 
-        # ── DataLoaders ───────────────────────────────────────────────────
+        # -- DataLoaders ---------------------------------------------------
         nw = max(0, args.num_workers)
         ldr_kw: dict = {"batch_size": args.batch_size, "num_workers": nw, "pin_memory": DEVICE.type == "cuda"}
         if nw > 0:
@@ -405,7 +404,7 @@ def run_train(args: argparse.Namespace) -> None:
         )
         val_loader = DataLoader(Subset(dataset, val_idx), shuffle=False, **ldr_kw)
 
-        # ── Save dir ──────────────────────────────────────────────────────
+        # -- Save dir ------------------------------------------------------
         run_dir = os.path.join("results", args.dataset, args.processing_mode, f"fold_{fold}")
         if args.save_model:
             os.makedirs(run_dir, exist_ok=True)
@@ -414,7 +413,7 @@ def run_train(args: argparse.Namespace) -> None:
                 for k, v in {**vars(args), "fold": fold}.items():
                     f.write(f"{k}={v}\n")
 
-        # ── Training loop ─────────────────────────────────────────────────
+        # -- Training loop -------------------------------------------------
         best_f1 = 0.0
         if args.wandb_watch:
             wandb.watch(model, log="gradients", log_freq=100)
@@ -457,7 +456,7 @@ def run_train(args: argparse.Namespace) -> None:
     print("\nAll folds completed.")
 
 
-# ═══════════════════════════════════════════════════════════════════════════
+# ===========================================================================
 
 if __name__ == "__main__":
     run_train(parse_args())

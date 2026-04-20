@@ -1,7 +1,7 @@
 """Hybrid Tensor-Network + Variational Quantum Circuit classifier.
 
 Architecture:
-    ResNet backbone → TN bridge (MPS *or* PEPS) → VQC (PennyLane *or* MLP) → BN → linear head
+    ResNet backbone -> TN bridge (MPS / PEPS / TTN) -> PennyLane VQC -> BN -> linear head
 """
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-# ── Maths helpers ─────────────────────────────────────────────────────────
+# -- Maths helpers ---------------------------------------------------------
 
 
 def _l2_normalize(x: torch.Tensor, dim: int = -1, eps: float = 1e-8) -> torch.Tensor:
@@ -34,7 +34,7 @@ def _generalized_ZX(dim: int, device=None, dtype=None) -> Tuple[torch.Tensor, to
     return Z, X
 
 
-# ── MPS core ──────────────────────────────────────────────────────────────
+# -- MPS core --------------------------------------------------------------
 
 
 class _SpectralCore(nn.Module):
@@ -51,16 +51,16 @@ class _SpectralCore(nn.Module):
         return torch.exp(self.log_scale) * (self.base / norm)
 
 
-# ── MPS bridge ────────────────────────────────────────────────────────────
+# -- MPS bridge ------------------------------------------------------------
 
 
 class MPSBridge(nn.Module):
-    """Feature → qudit expectation values via a Matrix Product State.
+    """Feature to qudit expectation values via a Matrix Product State.
 
     1. Split features into Q chunks; encode each into amplitudes + gate.
     2. Contract through MPS cores (bidirectional environments).
-    3. Per-site Z/X expectations blended with learnable β.
-    4. Skip connection + learnable mixing α + bias.
+    3. Per-site Z/X expectations blended with learnable beta.
+    4. Skip connection + learnable mixing + bias.
     """
 
     def __init__(
@@ -108,7 +108,7 @@ class MPSBridge(nn.Module):
         self.register_buffer("ObsZ", Z)
         self.register_buffer("ObsX", X)
 
-    # ── encoding ─────────────────────────────────────────────────────────
+    # -- encoding ---------------------------------------------------------
 
     def _encode(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         B = x.shape[0]
@@ -122,7 +122,7 @@ class MPSBridge(nn.Module):
             gates.append(torch.sigmoid(self.fc_gate[i](h)).squeeze(-1))
         return torch.stack(amps, 1), torch.stack(gates, 1)
 
-    # ── environment contraction ──────────────────────────────────────────
+    # -- environment contraction ------------------------------------------
 
     def _left_envs(self, amps: torch.Tensor) -> List[torch.Tensor]:
         B = amps.shape[0]
@@ -161,7 +161,7 @@ class MPSBridge(nn.Module):
         beta = torch.sigmoid(self.beta_logit).unsqueeze(0)
         return beta * torch.stack(z_list, 1) + (1 - beta) * torch.stack(x_list, 1)
 
-    # ── forward ──────────────────────────────────────────────────────────
+    # -- forward ----------------------------------------------------------
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         amps, gates = self._encode(x)
@@ -172,7 +172,7 @@ class MPSBridge(nn.Module):
         return alpha * z_mps + (1 - alpha) * z_skip + self.bias
 
 
-# ── PEPS bridge ───────────────────────────────────────────────────────────
+# -- PEPS bridge -----------------------------------------------------------
 
 
 class _PEPSSpectralCore(nn.Module):
@@ -498,7 +498,7 @@ class TTNBridge(nn.Module):
 # -- PennyLane quantum layer ------------------------------------------------
 
 class PennyLaneQuantumLayer(nn.Module):
-    """Variational quantum circuit: RX(inputs) → [RX/RY/RZ + ring CNOT]×L → ⟨Z⟩."""
+    """Variational quantum circuit: RX(inputs) -> [RX/RY/RZ + ring CNOT]xL -> <Z>."""
 
     def __init__(self, n_qubits: int, n_layers: int) -> None:
         super().__init__()
@@ -509,8 +509,7 @@ class PennyLaneQuantumLayer(nn.Module):
             import pennylane as qml
         except ImportError as exc:
             raise ImportError(
-                "PennyLane is required for the quantum layer. "
-                "Install it or use --no_pennylane for the classical fallback."
+                "PennyLane is required for the quantum layer. Install it with `pip install pennylane`."
             ) from exc
 
         dev, diff = None, None
@@ -547,7 +546,7 @@ class PennyLaneQuantumLayer(nn.Module):
         return self.qlayer(x)
 
 
-# ── ResNet feature extractor ─────────────────────────────────────────────
+# -- ResNet feature extractor ---------------------------------------------
 
 _FEAT_DIM = {"resnet18": 512, "resnet34": 512, "resnet50": 2048}
 
@@ -617,19 +616,19 @@ class _ResNetFeatureExtractor(nn.Module):
         missing, unexpected = model.load_state_dict(cleaned, strict=False)
         missing_bb = [k for k in missing if not k.startswith("fc.")]
         if missing_bb:
-            print(f"[Backbone] Warning – missing keys: {missing_bb[:10]}")
+            print(f"[Backbone] Warning missing keys: {missing_bb[:10]}")
         if unexpected:
-            print(f"[Backbone] Warning – unexpected keys: {unexpected[:10]}")
+            print(f"[Backbone] Warning unexpected keys: {unexpected[:10]}")
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.backbone(x).flatten(1)
 
 
-# ── Hybrid classifier ────────────────────────────────────────────────────
+# -- Hybrid classifier ----------------------------------------------------
 
 
 class HybridTNClassifier(nn.Module):
-    """ResNet → TN bridge (MPS/PEPS) → VQC → BN → linear.
+    """ResNet -> TN bridge (MPS/PEPS/TTN) -> VQC -> BN -> linear.
 
     Drop-in replacement for a plain ResNet classifier.
     Input:  ``(B, 3, H, W)``  Output: ``(B, n_classes)``
@@ -639,12 +638,11 @@ class HybridTNClassifier(nn.Module):
         self,
         n_classes: int,
         n_qubits: int = 8,
-        mps_bond_dim: int = 64,
-        mps_phys_dim: int = 2,
+        tn_bond_dim: int = 64,
+        tn_phys_dim: int = 2,
         bridge_hidden_dim: int = 128,
         vqc_layers: int = 2,
         freeze_resnet: bool = True,
-        use_pennylane: bool = True,
         bridge_type: str = "mps",
         backbone: str = "resnet18",
         backbone_weights: Optional[str] = None,
@@ -673,21 +671,15 @@ class HybridTNClassifier(nn.Module):
             )
 
         if bridge_type == "mps":
-            self.tn_bridge = MPSBridge(feat_dim, n_qubits, mps_bond_dim, mps_phys_dim, bridge_hidden_dim)
+            self.tn_bridge = MPSBridge(feat_dim, n_qubits, tn_bond_dim, tn_phys_dim, bridge_hidden_dim)
         elif bridge_type == "peps":
-            self.tn_bridge = PEPSBridge(feat_dim, n_qubits, mps_bond_dim, mps_phys_dim, bridge_hidden_dim)
+            self.tn_bridge = PEPSBridge(feat_dim, n_qubits, tn_bond_dim, tn_phys_dim, bridge_hidden_dim)
         elif bridge_type == "ttn":
-            self.tn_bridge = TTNBridge(feat_dim, n_qubits, mps_bond_dim, mps_phys_dim, bridge_hidden_dim)
+            self.tn_bridge = TTNBridge(feat_dim, n_qubits, tn_bond_dim, tn_phys_dim, bridge_hidden_dim)
         else:
             raise ValueError(f"Unknown bridge_type '{bridge_type}'.")
 
-        if use_pennylane:
-            self.quantum = PennyLaneQuantumLayer(n_qubits, vqc_layers)
-        else:
-            self.quantum = nn.Sequential(
-                nn.Linear(n_qubits, 4 * n_qubits), nn.Tanh(),
-                nn.Linear(4 * n_qubits, n_qubits),
-            )
+        self.quantum = PennyLaneQuantumLayer(n_qubits, vqc_layers)
 
         self.q_norm = nn.BatchNorm1d(n_qubits)
         self.q_proj = nn.Linear(n_qubits, n_classes)
@@ -700,32 +692,30 @@ class HybridTNClassifier(nn.Module):
         return self.q_proj(q_out)
 
 
-# ── Convenience factory ──────────────────────────────────────────────────
+# -- Convenience factory --------------------------------------------------
 
 
 def hybrid_tn_model(
     fc_out_features: int,
     n_qubits: int = 8,
-    mps_bond_dim: int = 64,
-    mps_phys_dim: int = 2,
-    mps_hidden_dim: int = 128,
+    tn_bond_dim: int = 64,
+    tn_phys_dim: int = 2,
+    tn_hidden_dim: int = 128,
     vqc_layers: int = 2,
     freeze_resnet: bool = True,
-    use_pennylane: bool = True,
     tn_bridge: str = "mps",
     backbone: str = "resnet18",
     backbone_weights: Optional[str] = None,
 ) -> HybridTNClassifier:
-    """Factory for :class:`HybridTNClassifier`."""
+    """Factory for `HybridTNClassifier`."""
     return HybridTNClassifier(
         n_classes=fc_out_features,
         n_qubits=n_qubits,
-        mps_bond_dim=mps_bond_dim,
-        mps_phys_dim=mps_phys_dim,
-        bridge_hidden_dim=mps_hidden_dim,
+        tn_bond_dim=tn_bond_dim,
+        tn_phys_dim=tn_phys_dim,
+        bridge_hidden_dim=tn_hidden_dim,
         vqc_layers=vqc_layers,
         freeze_resnet=freeze_resnet,
-        use_pennylane=use_pennylane,
         bridge_type=tn_bridge,
         backbone=backbone,
         backbone_weights=backbone_weights,

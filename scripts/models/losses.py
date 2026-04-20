@@ -20,7 +20,7 @@ class FocalLoss(nn.Module):
 
     Args:
         weight: Per-class weight tensor (same semantics as ``nn.CrossEntropyLoss``).
-        gamma: Focusing parameter (0 → standard CE; 2 → default).
+        gamma: Focusing parameter (0 -> standard CE; 2 -> default).
         label_smoothing: Smoothing applied to the target distribution.
         reduction: ``'mean'`` | ``'sum'`` | ``'none'``.
     """

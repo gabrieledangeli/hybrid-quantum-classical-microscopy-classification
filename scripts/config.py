@@ -10,16 +10,16 @@ from dotenv import load_dotenv
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(_PROJECT_ROOT / ".env")
 
-DATA_DIR: str = os.environ.get("MICROSCOPY_ROOT", "./data")
+DATA_DIR = os.environ.get("MICROSCOPY_ROOT", "./data")
 
 
 def parse_args() -> argparse.Namespace:
     """Parse and return command-line arguments."""
     parser = argparse.ArgumentParser(
-        description="Hybrid Quantum-Classical CNN – Medical Image Classification"
+        description="Hybrid Quantum-Classical CNN - Medical Image Classification"
     )
 
-    # ── Dataset ───────────────────────────────────────────────────────────
+    # -- Dataset -----------------------------------------------------------
     ds = parser.add_argument_group("Dataset")
     ds.add_argument("--dataset", type=str, default="Microscopy",
                     choices=["Microscopy", "MicroscopyRGB"],
@@ -27,16 +27,16 @@ def parse_args() -> argparse.Namespace:
     ds.add_argument("--num_workers", type=int, default=4,
                     help="DataLoader worker processes.")
     ds.add_argument("--min_samples_per_class", type=int, default=15,
-                    help="Minimum total samples per class (≥15 ensures ≥10 train samples with train_size=0.7).")
+                    help="Minimum total samples per class (>= 15 ensures >= 10 train samples with train_size=0.7).")
     ds.add_argument("--below_threshold_strategy", type=str, default="drop",
                     choices=["drop", "merge_to_rare"],
                     help="How to handle classes below min_samples_per_class.")
     ds.add_argument("--rare_class_name", type=str, default="RARE",
                     help="Merged class name when strategy=merge_to_rare.")
 
-    # ── Cross-validation ──────────────────────────────────────────────────
+    # -- Cross-validation --------------------------------------------------
     cv = parser.add_argument_group("Cross-validation")
-    cv.add_argument("--n_splits", type=int, default=1,
+    cv.add_argument("--n_splits", type=int, default=3,
                     help="Number of CV splits/folds.")
     cv.add_argument("--cv_strategy", type=str, default="shuffle_split",
                     choices=["kfold", "shuffle_split"],
@@ -46,7 +46,7 @@ def parse_args() -> argparse.Namespace:
     cv.add_argument("--train_size", type=float, default=0.7,
                     help="Proportion of the dataset in the train split.")
 
-    # ── Imbalance handling ────────────────────────────────────────────────
+    # -- Imbalance handling ------------------------------------------------
     ib = parser.add_argument_group("Imbalance handling")
     ib.add_argument("--imbalance_handling", type=str, default="both",
                     choices=["sampler", "loss", "both", "none"],
@@ -57,9 +57,9 @@ def parse_args() -> argparse.Namespace:
     ib.add_argument("--undersample_strength", type=float, default=0.7,
                     help="Maximum soft-undersampling strength [0, 1].")
     ib.add_argument("--undersample_warmup_epochs", type=int, default=10,
-                    help="Epochs to ramp undersampling from 0 → max strength.")
+                    help="Epochs to ramp undersampling from 0 to max strength.")
 
-    # ── Processing ────────────────────────────────────────────────────────
+    # -- Processing --------------------------------------------------------
     pr = parser.add_argument_group("Image processing")
     pr.add_argument("--processing_mode", type=str, default="static",
                     choices=["parametrized", "static", "neural_network", "none"],
@@ -76,7 +76,7 @@ def parse_args() -> argparse.Namespace:
     pr.add_argument("--freeze_processor", action="store_true",
                     help="Freeze processor weights.")
 
-    # ── Augmentation ──────────────────────────────────────────────────────
+    # -- Augmentation ------------------------------------------------------
     ag = parser.add_argument_group("Augmentation")
     ag.add_argument("--augmentation", type=str, default="weak",
                     choices=["none", "weak", "strong"],
@@ -84,11 +84,11 @@ def parse_args() -> argparse.Namespace:
     ag.add_argument("--conditional_augmentation", action="store_true",
                     help="Augment only rare classes.")
     ag.add_argument("--rare_class_threshold", type=int, default=30,
-                    help="Class is rare if train count ≤ this value.")
+                    help="Class is rare if train count <= this value.")
     ag.add_argument("--non_rare_aug_prob", type=float, default=0.0,
                     help="Probability of augmenting non-rare classes (conditional mode).")
 
-    # ── Training ──────────────────────────────────────────────────────────
+    # -- Training ----------------------------------------------------------
     tr = parser.add_argument_group("Training")
     tr.add_argument("--batch_size", type=int, default=64)
     tr.add_argument("--lr", type=float, default=1e-4,
@@ -103,21 +103,21 @@ def parse_args() -> argparse.Namespace:
                     choices=["cross_entropy", "focal"],
                     help="Loss function.")
     tr.add_argument("--focal_gamma", type=float, default=2.0,
-                    help="Focusing parameter γ for Focal Loss.")
-    tr.add_argument("--epochs", type=int, default=30)
+                    help="Focusing parameter gamma for Focal Loss.")
+    tr.add_argument("--epochs", type=int, default=50)
     tr.add_argument("--lr_warmup_epochs", type=int, default=0,
                     help="Linear LR warmup epochs (0 = off).")
     tr.add_argument("--check_val_every_n_epoch", type=int, default=1)
     tr.add_argument("--save_model", action="store_true",
                     help="Save the best model checkpoint.")
 
-    # ── Classifier ────────────────────────────────────────────────────────
+    # -- Classifier --------------------------------------------------------
     cl = parser.add_argument_group("Classifier")
     cl.add_argument("--classifier_network", type=str, default="resnet18",
                     choices=["resnet18", "resnet34", "resnet50", "hybrid_tn"],
                     help="Classifier architecture.")
     cl.add_argument("--classifier_pretrained", action="store_true",
-                    help="Use ImageNet-pretrained weights.")
+                    help="Use pretrained weights.")
     cl.add_argument("--freeze_resnet_backbone", action="store_true",
                     help="Freeze ResNet stem + layer1-3.")
     cl.add_argument("--backbone", type=str, default="resnet18",
@@ -126,25 +126,23 @@ def parse_args() -> argparse.Namespace:
     cl.add_argument("--backbone_weights", type=str, default=None,
                     help="Path to custom .pth backbone weights (e.g. RetCCL).")
 
-    # ── Hybrid TN + VQC ──────────────────────────────────────────────────
+    # -- Hybrid TN + VQC --------------------------------------------------
     hy = parser.add_argument_group("Hybrid TN + VQC")
     hy.add_argument("--n_qubits", type=int, default=8,
-                    help="Number of MPS sites/qubits. PEPS uses 16 fixed sites; TTN uses 16 leaves and 1/2/4/8 final states.")
-    hy.add_argument("--mps_bond_dim", type=int, default=64,
+                    help="Number of TN sites/qubits. PEPS uses 16 fixed sites; TTN uses 16 leaves and 1/2/4/8 final states.")
+    hy.add_argument("--tn_bond_dim", type=int, default=64,
                     help="Internal TN bond dimension. For exact PEPS this is clipped to 8.")
-    hy.add_argument("--mps_phys_dim", type=int, default=2)
-    hy.add_argument("--mps_hidden_dim", type=int, default=128)
+    hy.add_argument("--tn_phys_dim", type=int, default=2,
+                    help="Physical (site) dimension of the TN.")
+    hy.add_argument("--tn_hidden_dim", type=int, default=128,
+                    help="Hidden dimension of the per-site encoder MLP feeding the TN.")
     hy.add_argument("--tn_bridge", type=str, default="mps",
                     choices=["mps", "peps", "ttn"],
                     help="Tensor-network bridge type. PEPS uses a fixed exact 4x4 topology; TTN uses a fixed 16-leaf binary tree.")
     hy.add_argument("--vqc_layers", type=int, default=2,
                     help="Parametrised VQC layers.")
-    hy.add_argument("--use_pennylane", action="store_true", default=True,
-                    help="Use PennyLane quantum simulation.")
-    hy.add_argument("--no_pennylane", dest="use_pennylane", action="store_false",
-                    help="Classical MLP fallback instead of VQC.")
 
-    # ── Adversarial ───────────────────────────────────────────────────────
+    # -- Adversarial -------------------------------------------------------
     parser.add_argument("--adv_parameters",
                         choices=["all", "black_level", "white_balance",
                                  "colour_correction", "gamma_correct",
@@ -152,7 +150,7 @@ def parse_args() -> argparse.Namespace:
                                  "additive_layer"],
                         help="Target parameters for adversarial training.")
 
-    # ── Weights & Biases ─────────────────────────────────────────────────
+    # -- Weights & Biases -------------------------------------------------
     wb = parser.add_argument_group("Weights & Biases")
     wb.add_argument("--wandb_project", type=str, default="hqcnn-medical",
                     help="W&B project name.")

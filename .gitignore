@@ -1,4 +1,4 @@
-# ── Python ───────────────────────────────────────────────────────────────
+# -- Python ---------------------------------------------------------------
 __pycache__/
 *.py[cod]
 *.pyo
@@ -7,28 +7,28 @@ dist/
 build/
 *.egg
 
-# ── Virtual environments ────────────────────────────────────────────────
+# -- Virtual environments -------------------------------------------------
 .venv/
 .env
 venv/
 env/
 
-# ── Jupyter ─────────────────────────────────────────────────────────────
+# -- Jupyter --------------------------------------------------------------
 .ipynb_checkpoints/
 
-# ── IDE / editor ────────────────────────────────────────────────────────
+# -- IDE / editor ---------------------------------------------------------
 .vscode/
 .idea/
 *.swp
 *.swo
 *~
 
-# ── OS ──────────────────────────────────────────────────────────────────
+# -- OS -------------------------------------------------------------------
 .DS_Store
 Thumbs.db
 Desktop.ini
 
-# ── Project: data & outputs ─────────────────────────────────────────────
+# -- Project: data & outputs ----------------------------------------------
 /data/
 /checkpoints/
 /results/
@@ -37,13 +37,23 @@ Desktop.ini
 /output*/
 /report/
 
-# ── Experiment tracking ─────────────────────────────────────────────────
+# -- Experiment tracking --------------------------------------------------
 wandb/
 
-# ── PennyLane cache ─────────────────────────────────────────────────────
+# -- PennyLane cache ------------------------------------------------------
 pennylane/
 
-# ── Temporary / generated ───────────────────────────────────────────────
+# -- Temporary / generated ------------------------------------------------
 *.zip
 tmpclaude*
 debug*
+
+# -- AI agent files (Claude Code, OpenAI Codex, Cursor, Copilot, etc.) ---
+CLAUDE.md
+AGENTS.md
+**/CLAUDE.md
+**/AGENTS.md
+.claude/
+.cursorrules
+.cursor/
+.github/copilot-instructions.md

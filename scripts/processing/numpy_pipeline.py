@@ -16,7 +16,7 @@ from scipy.signal import convolve2d
 from skimage.color import rgb2yuv, yuv2rgb
 from skimage.filters import unsharp_mask
 
-# ── Debayer dispatch ──────────────────────────────────────────────────────
+# -- Debayer dispatch ------------------------------------------------------
 
 _DEBAYER_FN = {
     "bilinear": demosaicing_CFA_Bayer_bilinear,
@@ -24,14 +24,14 @@ _DEBAYER_FN = {
     "menon2007": demosaicing_CFA_Bayer_Menon2007,
 }
 
-# ── Public API ────────────────────────────────────────────────────────────
+# -- Public API ------------------------------------------------------------
 
 
 class RawProcessingPipeline:
     """Transform a RAW Bayer image to a processed RGB tensor.
 
-    Steps: black-level removal → demosaic → WB → colour correction →
-    dynamic-range normalisation → sharpening → denoising → gamma.
+    Steps: black-level removal -> demosaic -> WB -> colour correction ->
+    dynamic-range normalisation -> sharpening -> denoising -> gamma.
 
     Args:
         camera_parameters: ``(black_level, white_balance, colour_matrix)``.
@@ -61,7 +61,7 @@ class RawProcessingPipeline:
         return torch.from_numpy(out.transpose(2, 0, 1).copy()).float()
 
 
-# ── Full pipeline ─────────────────────────────────────────────────────────
+# -- Full pipeline ---------------------------------------------------------
 
 
 def process_raw(
@@ -79,7 +79,7 @@ def process_raw(
     fft_fraction: float = 0.3,
     gamma: float = 2.2,
 ) -> np.ndarray:
-    """Apply the full RAW → RGB processing pipeline."""
+    """Apply the full RAW -> RGB processing pipeline."""
     # Black-level removal
     img = _remove_black_level(img, black_level)
 
@@ -109,7 +109,7 @@ def process_raw(
     return _adjust_gamma(img, gamma)
 
 
-# ── Primitive ops ─────────────────────────────────────────────────────────
+# -- Primitive ops ---------------------------------------------------------
 
 
 def _remove_black_level(img: np.ndarray, bl) -> np.ndarray:

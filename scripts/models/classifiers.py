@@ -20,7 +20,7 @@ from torchvision.models import (
     resnet50,
 )
 
-# ── ResNet factory ────────────────────────────────────────────────────────
+# -- ResNet factory --------------------------------------------------------
 
 _RESNET_REGISTRY = {
     "resnet18": (resnet18, ResNet18_Weights.DEFAULT),
@@ -59,11 +59,11 @@ def resnet_model(
     return model
 
 
-# ── End-to-End model ──────────────────────────────────────────────────────
+# -- End-to-End model ------------------------------------------------------
 
 
 class EndToEndModel(nn.Module):
-    """Pipeline wrapper: *processor → augmentation → normalisation → classifier*.
+    """Pipeline wrapper: *processor -> augmentation -> normalisation -> classifier*.
 
     When *conditional augmentation* is enabled only samples whose labels belong
     to ``augmentation_target_classes`` are augmented with probability 1, while
@@ -96,7 +96,7 @@ class EndToEndModel(nn.Module):
         if freeze_processor and self.processor is not None:
             _freeze(self.processor)
 
-    # ── Forward ───────────────────────────────────────────────────────────
+    # -- Forward -----------------------------------------------------------
 
     def forward(self, x: torch.Tensor, labels: Optional[torch.Tensor] = None) -> torch.Tensor:
         if self.processor is not None:
@@ -110,7 +110,7 @@ class EndToEndModel(nn.Module):
 
         return self.classifier(x)
 
-    # ── Internals ─────────────────────────────────────────────────────────
+    # -- Internals ---------------------------------------------------------
 
     def _apply_augmentation(self, x: torch.Tensor, labels: Optional[torch.Tensor]) -> torch.Tensor:
         """Apply augmentation, optionally conditioned on class membership."""
@@ -129,7 +129,7 @@ class EndToEndModel(nn.Module):
         return torch.stack(augmented)
 
 
-# ── Channel normalisation ────────────────────────────────────────────────
+# -- Channel normalisation ------------------------------------------------
 
 
 class TensorNormalize(nn.Module):
@@ -150,7 +150,7 @@ class TensorNormalize(nn.Module):
         raise ValueError(f"Expected 3-D or 4-D tensor, got {x.ndim}-D.")
 
 
-# ── Utilities ─────────────────────────────────────────────────────────────
+# -- Utilities -------------------------------------------------------------
 
 
 def _freeze(module: nn.Module) -> None:

@@ -25,7 +25,7 @@ def get_dataset(
     name: str,
     root_dir: str,
     intensity_ratio: float = 1.0,
-    min_samples_per_class: int = 5,
+    min_samples_per_class: int = 15, # Default is 15 to retain at least 10 training samples per class after 70/30% training/test split
     below_threshold_strategy: str = "drop",
     rare_class_name: str = "RARE",
 ) -> Dataset:
@@ -77,7 +77,7 @@ class ImageFolderDataset(Dataset):
         self.images = list_images_in_dir(img_dir)
         if len(self.images) != len(self.labels):
             raise ValueError(
-                f"Image count ({len(self.images)}) ≠ label count ({len(self.labels)})."
+                f"Image count ({len(self.images)}) != label count ({len(self.labels)})."
             )
 
     def __repr__(self) -> str:
@@ -160,7 +160,7 @@ class MicroscopyDataset(ImageFolderDataset):
     dataset_mean = [0.91, 0.83, 0.94]
     dataset_std = [0.08, 0.13, 0.05]
 
-    # Files known to be corrupted / mislabelled
+    # Files known to be corrupted
     _INVALID_FILES = frozenset({"Ma190c_lame3_zone13_composite_Mcropped_2.tiff"})
 
     def __init__(
@@ -169,19 +169,19 @@ class MicroscopyDataset(ImageFolderDataset):
         intensity_ratio: float = 1.0,
         transform: Optional[Callable] = None,
         bits: int = 16,
-        min_samples_per_class: int = 5,
+        min_samples_per_class: int = 15, # Default is 15 to retain at least 10 training samples per class after 70/30% training/test split
         below_threshold_strategy: str = "drop",
         rare_class_name: str = "RARE",
     ) -> None:
         if intensity_ratio != 1.0:
             raise ValueError("Only intensity_ratio=1.0 is supported for RAW images.")
         if min_samples_per_class < 1:
-            raise ValueError(f"min_samples_per_class must be ≥ 1, got {min_samples_per_class}")
+            raise ValueError(f"min_samples_per_class must be >= 1, got {min_samples_per_class}")
         if below_threshold_strategy not in ("drop", "merge_to_rare"):
             raise ValueError(f"Unknown strategy: '{below_threshold_strategy}'.")
 
         self.root_dir = root_dir
-        self._cache: dict[int, Any] = {}
+        self._cache = {}
         self.img_dir = os.path.join(
             root_dir, "images", f"raw_scale{int(intensity_ratio * 100):03d}"
         )
@@ -196,7 +196,6 @@ class MicroscopyDataset(ImageFolderDataset):
         if not os.path.isfile(label_file):
             raise FileNotFoundError(f"Label file not found: {label_file}")
 
-        # ── Parse manifest & apply class-filtering strategy ──────────────
         image_names, class_labels_raw = self._read_label_file(label_file)
 
         label_counts = Counter(class_labels_raw)
@@ -214,7 +213,7 @@ class MicroscopyDataset(ImageFolderDataset):
             class_mapping = {c: c for c in eligible}
             selected_classes = set(eligible)
 
-        # Metadata for logging / debugging
+        # Metadata for logging and debugging
         self.class_counts_raw = class_counts_raw
         self.dropped_classes = sorted(c for c in low_count if c not in selected_classes)
         self.merged_classes = sorted(low_count) if below_threshold_strategy == "merge_to_rare" else []
