@@ -110,7 +110,6 @@ HQCNNxLargeScaleMedicalImages/
         +-- __init__.py
         +-- conversions.py      # np <-> torch tensor helpers
         +-- metrics.py          # Multi-class classification metrics
-        +-- visualization.py    # Tensor saving & image grid export
 ```
 
 ---
@@ -159,20 +158,20 @@ data/
 |   +-- raw_scale100/      # 16-bit RAW Bayer TIFF images
 |   |   +-- <filename>.tiff
 |   |   +-- ...
-|   +-- rgb_scale100/      # Pre-processed 16-bit RGB TIFF images
+|   +-- rgb_scale100/      # Pre-processed RGB images (8-bit/16-bit TIFF or PNG)
 |       +-- <filename>.tiff
 |       +-- ...
 +-- labels/
     +-- Ma190c_annotations.dat   # <stem> <CLASS> per line
 ```
 
-Pass `--data_dir ./data` (or the actual path) when launching training.
+Pass `--data_dir ./data` (or the actual path) when launching training. If omitted, the CLI falls back to `MICROSCOPY_ROOT` from `.env`, then to `./data`.
 
 ### Supported classes (16 leukocyte subtypes)
 
 `BAS`, `EBO`, `EOS`, `KSC`, `LYA`, `LYT`, `MMZ`, `MOB`, `MON`, `MYB`, `MYO`, `NGB`, `NGS`, `PMB`, `PMO`, `UNC`
 
-Classes below `--min_samples_per_class` can be **dropped** or **merged** into a single `RARE` class.
+Classes below `--min_samples_per_class` can be **dropped** or **merged** into a single `RARE` class. The default `15` is chosen so that each class still contributes at least 10 training samples both with the default 3-fold CV and with a 70/30 stratified shuffle split.
 
 ---
 
@@ -215,7 +214,6 @@ python -m scripts.train \
     --classifier_network hybrid_tn \
     --tn_bridge peps \
     --n_qubits 8 \
-    --peps_message_passing_steps 3 \
     --epochs 30
 ```
 
@@ -256,9 +254,10 @@ Run `python -m scripts.train --help` for the full list. Key groups:
 
 ## Results & Logging
 
-- **Weights & Biases**: Each fold creates a separate W&B run with loss curves, accuracy, macro/weighted F1, balanced accuracy, per-class precision/recall, and confusion matrices.
+- **Weights & Biases**: Each fold creates a separate W&B run with loss curves, accuracy, macro/weighted F1, balanced accuracy, per-class precision/recall, plus one `val/last_confusion_matrix` and one `val/best_confusion_matrix` instead of logging a new confusion matrix every validation step.
 - **Checkpoints**: When `--save_model` is enabled, the best model (by val macro-F1) is saved to `results/<dataset>/<processing_mode>/fold_<k>/best_model.pth`.
 - **Config snapshot**: A `state_dict.txt` file records the full CLI invocation and hyperparameters alongside each checkpoint.
+- **Fine-tuning semantics**: `--freeze_resnet_backbone` keeps `layer4 + fc` trainable for plain ResNets. In `hybrid_tn`, the ResNet extractor has no FC head, so the same flag leaves only `layer4` trainable.
 
 ---
 

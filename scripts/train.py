@@ -124,8 +124,8 @@ def validate(
     criterion: nn.Module,
     device: torch.device,
     class_names: Optional[List[str]] = None,
-) -> Tuple[float, Dict[str, Any]]:
-    """Run validation and return ``(avg_loss, metrics)``."""
+) -> Tuple[float, Dict[str, Any], np.ndarray, np.ndarray]:
+    """Run validation and return ``(avg_loss, metrics, labels, preds)``."""
     model.eval()
     running_loss = 0.0
     all_preds, all_labels = [], []
@@ -144,19 +144,7 @@ def validate(
     preds_np = np.concatenate(all_preds)
     labels_np = np.concatenate(all_labels)
     metrics = compute_metrics(preds_np, labels_np, class_names)
-
-    # Log confusion matrix to W&B
-    try:
-        wandb.log({
-            "val/confusion_matrix": wandb.plot.confusion_matrix(
-                probs=None, y_true=labels_np.tolist(), preds=preds_np.tolist(),
-                class_names=metrics["cm_labels"],
-            )
-        }, commit=False)
-    except Exception as exc:
-        print(f"[Warning] W&B confusion matrix log failed: {exc}")
-
-    return avg_loss, metrics
+    return avg_loss, metrics, labels_np, preds_np
 
 
 # ===========================================================================
@@ -170,6 +158,7 @@ def _build_processor(args, dataset):
 
     if is_rgb:
         dataset.transform = T.ToTensor()
+        dataset.clear_cache()
         return None, TensorNormalize(dataset.dataset_mean, dataset.dataset_std)
 
     if args.processing_mode == "static":
@@ -181,6 +170,7 @@ def _build_processor(args, dataset):
                 denoising=args.sp_denoising,
             ),
         ])
+        dataset.clear_cache()
         return None, TensorNormalize(dataset.dataset_mean, dataset.dataset_std)
 
     mosaic_norm = TensorNormalize([0.5663, 0.1401, 0.0731], [0.097, 0.0423, 0.008])
@@ -207,6 +197,7 @@ def _build_classifier(args, n_classes: int):
             freeze_resnet=args.freeze_resnet_backbone,
             backbone=args.backbone,
             backbone_weights=args.backbone_weights,
+            pretrained=args.classifier_pretrained,
         )
     return resnet_model(
         model_name=args.classifier_network,
@@ -285,6 +276,43 @@ def _build_scheduler(args, optimizer):
     return cosine
 
 
+def _make_wandb_run_name(args: argparse.Namespace, fold: int) -> str:
+    """Generate a fold-specific W&B run name."""
+    fold_suffix = f"fold{fold + 1}of{args.n_splits}"
+    if args.run_name:
+        return f"{args.run_name}_{fold_suffix}"
+
+    model_tag = args.classifier_network
+    if args.classifier_network == "hybrid_tn":
+        model_tag = f"{args.classifier_network}-{args.backbone}-{args.tn_bridge}"
+
+    return (
+        f"{datetime.now():%d-%m}_{model_tag}"
+        f"_aug-{args.augmentation}_bal-{args.imbalance_handling}"
+        f"_{fold_suffix}"
+    )
+
+
+def _log_wandb_confusion_matrix(
+    key: str,
+    labels: np.ndarray,
+    preds: np.ndarray,
+    class_names: List[str],
+) -> None:
+    """Log a single confusion matrix plot to W&B."""
+    try:
+        wandb.log({
+            key: wandb.plot.confusion_matrix(
+                probs=None,
+                y_true=labels.tolist(),
+                preds=preds.tolist(),
+                class_names=class_names,
+            )
+        })
+    except Exception as exc:
+        print(f"[Warning] W&B confusion matrix log failed for '{key}': {exc}")
+
+
 # ===========================================================================
 #  Main training routine
 # ===========================================================================
@@ -328,11 +356,7 @@ def run_train(args: argparse.Namespace) -> None:
         config["fold"] = fold
         wandb.init(
             project=args.wandb_project, entity=args.wandb_entity,
-            name=args.run_name or (
-                f"{datetime.now():%d-%m}_{args.classifier_network}"
-                f"_aug-{args.augmentation}_bal-{args.imbalance_handling}"
-                f"_fold{fold+1}of{args.n_splits}"
-            ),
+            name=_make_wandb_run_name(args, fold),
             config=config,
         )
 
@@ -414,7 +438,10 @@ def run_train(args: argparse.Namespace) -> None:
                     f.write(f"{k}={v}\n")
 
         # -- Training loop -------------------------------------------------
-        best_f1 = 0.0
+        best_f1 = float("-inf")
+        best_epoch: Optional[int] = None
+        best_val_snapshot: Optional[Dict[str, Any]] = None
+        last_val_snapshot: Optional[Dict[str, Any]] = None
         if args.wandb_watch:
             wandb.watch(model, log="gradients", log_freq=100)
 
@@ -430,7 +457,15 @@ def run_train(args: argparse.Namespace) -> None:
             scheduler.step()
 
             if epoch % args.check_val_every_n_epoch == 0:
-                val_loss, val_m = validate(model, val_loader, criterion, DEVICE, class_names)
+                val_loss, val_m, val_labels, val_preds = validate(
+                    model, val_loader, criterion, DEVICE, class_names
+                )
+                last_val_snapshot = {
+                    "epoch": epoch,
+                    "metrics": val_m,
+                    "labels": val_labels.copy(),
+                    "preds": val_preds.copy(),
+                }
 
                 pbar.set_postfix(loss=f"{val_loss:.4f}", mF1=f"{val_m['macro_f1']:.4f}", bAcc=f"{val_m['balanced_accuracy']:.4f}")
 
@@ -448,8 +483,39 @@ def run_train(args: argparse.Namespace) -> None:
 
                 if val_m["macro_f1"] > best_f1:
                     best_f1 = val_m["macro_f1"]
+                    best_epoch = epoch
+                    best_val_snapshot = {
+                        "epoch": epoch,
+                        "metrics": val_m,
+                        "labels": val_labels.copy(),
+                        "preds": val_preds.copy(),
+                    }
                     if args.save_model:
                         torch.save(model.state_dict(), os.path.join(run_dir, "best_model.pth"))
+
+        if best_val_snapshot is not None:
+            wandb.run.summary["best_epoch"] = best_epoch
+            wandb.run.summary["best_val_macro_f1"] = best_val_snapshot["metrics"]["macro_f1"]
+            wandb.run.summary["best_val_balanced_accuracy"] = best_val_snapshot["metrics"]["balanced_accuracy"]
+            wandb.run.summary["best_val_weighted_f1"] = best_val_snapshot["metrics"]["weighted_f1"]
+            _log_wandb_confusion_matrix(
+                "val/best_confusion_matrix",
+                best_val_snapshot["labels"],
+                best_val_snapshot["preds"],
+                best_val_snapshot["metrics"]["cm_labels"],
+            )
+
+        if last_val_snapshot is not None:
+            wandb.run.summary["last_val_epoch"] = last_val_snapshot["epoch"]
+            wandb.run.summary["last_val_macro_f1"] = last_val_snapshot["metrics"]["macro_f1"]
+            wandb.run.summary["last_val_balanced_accuracy"] = last_val_snapshot["metrics"]["balanced_accuracy"]
+            wandb.run.summary["last_val_weighted_f1"] = last_val_snapshot["metrics"]["weighted_f1"]
+            _log_wandb_confusion_matrix(
+                "val/last_confusion_matrix",
+                last_val_snapshot["labels"],
+                last_val_snapshot["preds"],
+                last_val_snapshot["metrics"]["cm_labels"],
+            )
 
         wandb.finish()
 

@@ -19,8 +19,8 @@ IMAGE_FILE_TYPES = {"dng", "png", "tif", "tiff"}
 
 
 def load_image(path: str) -> np.ndarray:
-    """Load an image file as a float32 NumPy array."""
-    return np.array(tifffile.imread(path), dtype=np.float32)
+    """Load an image file while preserving its on-disk dtype."""
+    return np.asarray(tifffile.imread(path))
 
 
 def list_images_in_dir(directory: str) -> List[str]:

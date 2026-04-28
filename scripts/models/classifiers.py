@@ -2,14 +2,10 @@
 
 from __future__ import annotations
 
-import os
-from collections import defaultdict
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import List, Optional, Set
 
 import torch
 import torch.nn as nn
-import torch.optim
-import torchvision.utils as vutils
 from torchvision.models import (
     ResNet,
     ResNet18_Weights,
@@ -37,8 +33,13 @@ def resnet_model(
 ) -> ResNet:
     """Build a ResNet with a replaced final FC layer.
 
-    When *freeze_backbone* is ``True``, only ``layer4`` and ``fc`` are trainable,
-    enabling efficient fine-tuning.
+    When *freeze_backbone* is ``True``, only ``layer4`` (the last residual
+    stage) and the freshly-initialised ``fc`` head are trainable; everything
+    else (stem, layer1-3) is frozen for efficient fine-tuning.
+
+    Note: this differs from the hybrid model's ``_ResNetFeatureExtractor``,
+    which has no FC head (the head lives downstream as TN bridge + VQC), so
+    ``freeze=True`` there leaves only ``layer4`` trainable.
     """
     key = model_name.lower().strip()
     if key not in _RESNET_REGISTRY:
@@ -116,17 +117,24 @@ class EndToEndModel(nn.Module):
         """Apply augmentation, optionally conditioned on class membership."""
         if self.augmentation is None:
             return x
-        if self.augmentation_target_classes is None or labels is None or x.ndim != 4:
+        if self.augmentation_target_classes is None or labels is None:
             return self.augmentation(x)
 
-        label_list = labels.detach().cpu().tolist()
-        augmented = []
-        for i, sample in enumerate(x):
-            should = int(label_list[i]) in self.augmentation_target_classes
-            if not should and self.non_target_augmentation_prob > 0.0:
-                should = torch.rand(1).item() < self.non_target_augmentation_prob
-            augmented.append(self.augmentation(sample) if should else sample)
-        return torch.stack(augmented)
+        target_classes = torch.as_tensor(
+            sorted(self.augmentation_target_classes),
+            device=labels.device,
+            dtype=labels.dtype,
+        )
+        apply_mask = torch.isin(labels, target_classes)
+        if self.non_target_augmentation_prob > 0.0:
+            sampled_non_targets = (
+                torch.rand(labels.shape[0], device=labels.device) < self.non_target_augmentation_prob
+            )
+            apply_mask = apply_mask | (~apply_mask & sampled_non_targets)
+
+        if not apply_mask.any():
+            return x
+        return self.augmentation(x, apply_mask=apply_mask)
 
 
 # -- Channel normalisation ------------------------------------------------
@@ -156,23 +164,3 @@ class TensorNormalize(nn.Module):
 def _freeze(module: nn.Module) -> None:
     for p in module.parameters():
         p.requires_grad = False
-
-
-def log_tensor(batch: torch.Tensor, path: str, save_tensors: bool = True, nrow: int = 8) -> None:
-    """Save a tensor as ``.pt`` and optionally as an image grid (``.png``)."""
-    if save_tensors:
-        torch.save(batch, path)
-
-    is_image = batch.ndim == 4 or (batch.ndim == 3 and batch.shape[0] in (1, 3, 4))
-    if not is_image:
-        return
-
-    img_path = path.replace(".pt", ".png")
-    directory, filename = os.path.split(img_path)
-    img_path = os.path.join(directory, f"img_{filename}")
-
-    try:
-        grid = vutils.make_grid(batch, nrow=nrow, normalize=True).squeeze()
-        vutils.save_image(grid, img_path)
-    except Exception as exc:
-        print(f"[Warning] Could not save image for {path}: {exc}")

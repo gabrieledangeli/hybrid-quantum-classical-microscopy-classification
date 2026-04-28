@@ -24,10 +24,17 @@ def parse_args() -> argparse.Namespace:
     ds.add_argument("--dataset", type=str, default="Microscopy",
                     choices=["Microscopy", "MicroscopyRGB"],
                     help="Dataset variant.")
+    ds.add_argument("--data_dir", type=str, default=DATA_DIR,
+                    help="Path to the dataset root directory. Defaults to the "
+                         "MICROSCOPY_ROOT env var (loaded from .env) or './data'.")
     ds.add_argument("--num_workers", type=int, default=4,
                     help="DataLoader worker processes.")
     ds.add_argument("--min_samples_per_class", type=int, default=15,
-                    help="Minimum total samples per class (>= 15 ensures >= 10 train samples with train_size=0.7).")
+                    help="Drop (or merge, see --below_threshold_strategy) any class "
+                         "with fewer than this many total samples. Default 15 ensures "
+                         ">= 10 train samples both with the default 3-fold CV and with "
+                         "--cv_strategy shuffle_split --train_size 0.7; raise it to be "
+                         "more aggressive about removing extreme rare classes.")
     ds.add_argument("--below_threshold_strategy", type=str, default="drop",
                     choices=["drop", "merge_to_rare"],
                     help="How to handle classes below min_samples_per_class.")
@@ -117,9 +124,12 @@ def parse_args() -> argparse.Namespace:
                     choices=["resnet18", "resnet34", "resnet50", "hybrid_tn"],
                     help="Classifier architecture.")
     cl.add_argument("--classifier_pretrained", action="store_true",
-                    help="Use pretrained weights.")
+                    help="Use pretrained weights. For hybrid_tn this applies to the "
+                         "ResNet backbone unless --backbone_weights is provided.")
     cl.add_argument("--freeze_resnet_backbone", action="store_true",
-                    help="Freeze ResNet stem + layer1-3.")
+                    help="Freeze ResNet stem + layer1-3. For pure ResNet, layer4 + fc "
+                         "stay trainable; for hybrid_tn, only layer4 stays trainable "
+                         "because the classifier head lives downstream.")
     cl.add_argument("--backbone", type=str, default="resnet18",
                     choices=["resnet18", "resnet34", "resnet50"],
                     help="ResNet backbone for the hybrid model.")
@@ -129,7 +139,7 @@ def parse_args() -> argparse.Namespace:
     # -- Hybrid TN + VQC --------------------------------------------------
     hy = parser.add_argument_group("Hybrid TN + VQC")
     hy.add_argument("--n_qubits", type=int, default=8,
-                    help="Number of TN sites/qubits. PEPS uses 16 fixed sites; TTN uses 16 leaves and 1/2/4/8 final states.")
+                    help="Number of TN sites/qubits. PEPS uses 16 fixed sites; TTN uses 16 leaves and 4/8 final states.")
     hy.add_argument("--tn_bond_dim", type=int, default=64,
                     help="Internal TN bond dimension. For exact PEPS this is clipped to 8.")
     hy.add_argument("--tn_phys_dim", type=int, default=2,
@@ -157,10 +167,9 @@ def parse_args() -> argparse.Namespace:
     wb.add_argument("--wandb_entity", type=str, default=None,
                     help="W&B entity (user/team).")
     wb.add_argument("--run_name", type=str, default=None,
-                    help="Custom W&B run name.")
+                    help="Base W&B run name. A fold suffix is appended automatically.")
     wb.add_argument("--wandb_watch", action="store_true",
                     help="Enable wandb.watch() gradient tracking.")
 
     args = parser.parse_args()
-    args.data_dir = DATA_DIR
     return args

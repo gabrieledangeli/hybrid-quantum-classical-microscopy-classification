@@ -231,7 +231,7 @@ class ParametrizedProcessing(nn.Module):
         self.gamma_correct = nn.Parameter(torch.tensor([2.2]))
 
         self.debayer = _Debayer()
-        self.sharpening_filter = nn.Conv2d(1, 1, 3, padding=1, bias=False)
+        self.sharpening_filter = nn.Conv2d(1, 1, 3, padding=1, padding_mode="reflect", bias=False)
         self.sharpening_filter.weight.data[0, 0] = K_SHARP.clone()
         self.gaussian_blur = nn.Conv2d(1, 1, 5, padding=2, padding_mode="reflect", bias=False)
         self.gaussian_blur.weight.data[0, 0] = K_BLUR.clone()

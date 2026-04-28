@@ -6,7 +6,7 @@ import os
 from collections import Counter
 from typing import Any, Callable, List, Optional, Tuple
 
-import torch
+import numpy as np
 from torch.utils.data import Dataset
 
 from .utils import list_images_in_dir, load_image
@@ -25,7 +25,7 @@ def get_dataset(
     name: str,
     root_dir: str,
     intensity_ratio: float = 1.0,
-    min_samples_per_class: int = 15, # Default is 15 to retain at least 10 training samples per class after 70/30% training/test split
+    min_samples_per_class: int = 15,  # Default 15 keeps >= 10 train samples with the default 3-fold CV or 70/30 shuffle split.
     below_threshold_strategy: str = "drop",
     rare_class_name: str = "RARE",
 ) -> Dataset:
@@ -50,7 +50,7 @@ def get_dataset(
 
 
 class ImageFolderDataset(Dataset):
-    """Generic image-folder dataset with lazy in-memory caching.
+    """Generic image-folder dataset.
 
     Args:
         img_dir: Path to the image directory.
@@ -72,7 +72,6 @@ class ImageFolderDataset(Dataset):
         self.labels = labels
         self.transform = transform
         self.bits = bits
-        self._cache: dict[int, Any] = {}
 
         self.images = list_images_in_dir(img_dir)
         if len(self.images) != len(self.labels):
@@ -92,20 +91,25 @@ class ImageFolderDataset(Dataset):
     def __len__(self) -> int:
         return len(self.images)
 
+    def _normalize_image(self, img: np.ndarray) -> np.ndarray:
+        img = img.astype(np.float32, copy=False)
+        return img / float(2 ** self.bits - 1)
+
     def __getitem__(self, idx: int) -> Tuple[Any, Any]:
-        label = self.labels[idx]
-
-        if idx in self._cache:
-            img = self._cache[idx]
-        else:
-            img = load_image(self.images[idx])
-            img = img / (2 ** self.bits - 1)
-            self._cache[idx] = img
-
+        img = load_image(self.images[idx])
+        img = self._normalize_image(img)
         if self.transform is not None:
             img = self.transform(img)
+        return img, self.labels[idx]
 
-        return img, label
+    def clear_cache(self) -> None:
+        """No-op compatibility hook.
+
+        Caching is intentionally disabled to avoid unbounded RAM growth with
+        large TIFF datasets, but callers can still safely invalidate the
+        dataset after mutating ``self.transform``.
+        """
+        return None
 
 
 # ── Subset ────────────────────────────────────────────────────────────────
@@ -145,7 +149,15 @@ class MicroscopyDataset(ImageFolderDataset):
 
     Camera parameters and normalisation statistics are dataset-level constants
     used by the image-processing pipeline and model normalisation layer.
+
+    Subclasses (e.g. :class:`MicroscopyDatasetRGB`) only need to override the
+    class-level attributes ``_IMAGE_EXTENSIONS`` and ``_IMAGE_DIR_PREFIX``,
+    plus any colour/bit-depth specific normalisation.
     """
+
+    # Subclass-overridable knobs
+    _IMAGE_EXTENSIONS: Tuple[str, ...] = (".tiff",)
+    _IMAGE_DIR_PREFIX: str = "raw_scale"
 
     # Camera intrinsics
     black_level = [9.834368023181512e-06] * 4
@@ -160,8 +172,8 @@ class MicroscopyDataset(ImageFolderDataset):
     dataset_mean = [0.91, 0.83, 0.94]
     dataset_std = [0.08, 0.13, 0.05]
 
-    # Files known to be corrupted
-    _INVALID_FILES = frozenset({"Ma190c_lame3_zone13_composite_Mcropped_2.tiff"})
+    # Stems known to be corrupted (extension-agnostic).
+    _INVALID_STEMS = frozenset({"Ma190c_lame3_zone13_composite_Mcropped_2"})
 
     def __init__(
         self,
@@ -169,7 +181,7 @@ class MicroscopyDataset(ImageFolderDataset):
         intensity_ratio: float = 1.0,
         transform: Optional[Callable] = None,
         bits: int = 16,
-        min_samples_per_class: int = 15, # Default is 15 to retain at least 10 training samples per class after 70/30% training/test split
+        min_samples_per_class: int = 15,  # Default 15 keeps >= 10 train samples with the default 3-fold CV or 70/30 shuffle split.
         below_threshold_strategy: str = "drop",
         rare_class_name: str = "RARE",
     ) -> None:
@@ -181,9 +193,8 @@ class MicroscopyDataset(ImageFolderDataset):
             raise ValueError(f"Unknown strategy: '{below_threshold_strategy}'.")
 
         self.root_dir = root_dir
-        self._cache = {}
         self.img_dir = os.path.join(
-            root_dir, "images", f"raw_scale{int(intensity_ratio * 100):03d}"
+            root_dir, "images", f"{self._IMAGE_DIR_PREFIX}{int(intensity_ratio * 100):03d}"
         )
         self.min_samples_per_class = min_samples_per_class
         self.below_threshold_strategy = below_threshold_strategy
@@ -196,7 +207,7 @@ class MicroscopyDataset(ImageFolderDataset):
         if not os.path.isfile(label_file):
             raise FileNotFoundError(f"Label file not found: {label_file}")
 
-        image_names, class_labels_raw = self._read_label_file(label_file)
+        stems, class_labels_raw = self._read_label_file(label_file)
 
         label_counts = Counter(class_labels_raw)
         self.valid_classes_list = [c for c in VALID_CLASSES if label_counts.get(c, 0) > 0]
@@ -219,16 +230,30 @@ class MicroscopyDataset(ImageFolderDataset):
         self.merged_classes = sorted(low_count) if below_threshold_strategy == "merge_to_rare" else []
         self.original_to_mapped_class = dict(class_mapping)
 
-        # Filter
-        filtered = [
-            (img, class_mapping[cls])
-            for img, cls in zip(image_names, class_labels_raw)
-            if cls in selected_classes and img not in self._INVALID_FILES
-        ]
+        # Resolve actual on-disk paths (handles subclass-specific extensions)
+        # and fail fast if annotations reference missing images.
+        filtered: List[Tuple[str, str]] = []
+        missing_stems: List[str] = []
+        for stem, cls in zip(stems, class_labels_raw):
+            if cls not in selected_classes or stem in self._INVALID_STEMS:
+                continue
+            path = self._resolve_image_path(stem)
+            if path is None:
+                missing_stems.append(stem)
+                continue
+            filtered.append((path, class_mapping[cls]))
+
+        if missing_stems:
+            preview = ", ".join(missing_stems[:5])
+            suffix = "..." if len(missing_stems) > 5 else ""
+            raise FileNotFoundError(
+                f"{len(missing_stems)} annotated stem(s) were not found under {self.img_dir}: "
+                f"{preview}{suffix}"
+            )
         if not filtered:
             raise RuntimeError("No valid images remaining after filtering.")
 
-        final_images, final_labels = zip(*filtered)
+        final_paths, final_labels = zip(*filtered)
 
         # Build class-index mapping (RARE always last if present)
         self.classes = sorted(set(final_labels))
@@ -240,17 +265,25 @@ class MicroscopyDataset(ImageFolderDataset):
                 "Try lowering --min_samples_per_class or using merge_to_rare."
             )
 
-        self.images = [os.path.join(self.img_dir, name) for name in final_images]
+        self.images = list(final_paths)
         self.labels = [self.classes.index(lbl) for lbl in final_labels]
         self.transform = transform
         self.bits = bits
 
     # ── Private helpers ───────────────────────────────────────────────────
 
+    def _resolve_image_path(self, stem: str) -> Optional[str]:
+        """Return the on-disk path for ``stem`` honouring subclass extensions."""
+        for ext in self._IMAGE_EXTENSIONS:
+            path = os.path.join(self.img_dir, f"{stem}{ext}")
+            if os.path.isfile(path):
+                return path
+        return None
+
     @staticmethod
     def _read_label_file(path: str) -> Tuple[List[str], List[str]]:
-        """Parse the annotation file → ``(image_filenames, class_labels)``."""
-        images: list[str] = []
+        """Parse the annotation file → ``(stems, class_labels)``."""
+        stems: list[str] = []
         labels: list[str] = []
         with open(path, "rb") as fh:
             for line in fh:
@@ -258,9 +291,9 @@ class MicroscopyDataset(ImageFolderDataset):
                 if not decoded:
                     continue
                 stem, cls = decoded.split()
-                images.append(f"{stem}.tiff")
+                stems.append(stem)
                 labels.append(cls)
-        return images, labels
+        return stems, labels
 
 
 # ── Microscopy RGB dataset ───────────────────────────────────────────────
@@ -269,9 +302,13 @@ class MicroscopyDataset(ImageFolderDataset):
 class MicroscopyDatasetRGB(MicroscopyDataset):
     """Microscopy dataset for pre-processed **RGB** images.
 
-    Inherits RAW dataset logic but swaps image paths from ``raw`` → ``rgb``
-    and uses RGB-specific normalisation statistics.
+    Inherits the RAW dataset's filtering/splitting logic; the only differences
+    are the on-disk directory, the supported file extensions (TIFF/TIF/PNG)
+    and the per-channel normalisation statistics.
     """
+
+    _IMAGE_EXTENSIONS = (".tiff", ".tif", ".png")
+    _IMAGE_DIR_PREFIX = "rgb_scale"
 
     camera_parameters = None  # type: ignore[assignment]
     dataset_mean = [0.5566, 0.4607, 0.5923]
@@ -283,7 +320,7 @@ class MicroscopyDatasetRGB(MicroscopyDataset):
         intensity_ratio: float = 1.0,
         transform: Optional[Callable] = None,
         bits: int = 16,
-        min_samples_per_class: int = 5,
+        min_samples_per_class: int = 15,
         below_threshold_strategy: str = "drop",
         rare_class_name: str = "RARE",
     ) -> None:
@@ -296,5 +333,18 @@ class MicroscopyDatasetRGB(MicroscopyDataset):
             below_threshold_strategy=below_threshold_strategy,
             rare_class_name=rare_class_name,
         )
-        # Point to the RGB image directory instead of RAW
-        self.images = [p.replace("raw", "rgb") for p in self.images]
+
+    def _normalize_image(self, img: np.ndarray) -> np.ndarray:
+        source_dtype = img.dtype
+        img = img.astype(np.float32, copy=False)
+
+        if np.issubdtype(source_dtype, np.integer):
+            return img / float(np.iinfo(source_dtype).max)
+
+        if np.issubdtype(source_dtype, np.floating):
+            max_val = float(np.max(img)) if img.size else 0.0
+            if max_val <= 1.0:
+                return img
+            return img / max_val
+
+        return super()._normalize_image(img)

@@ -73,7 +73,7 @@ def process_raw(
     sharpening: str = "unsharp_masking",
     sharp_radius: float = 1.0,
     sharp_amount: float = 1.0,
-    denoising: str = "median_denoising",
+    denoising: str = "gaussian_denoising",
     median_kernel_size: int = 3,
     gaussian_sigma: float = 0.5,
     fft_fraction: float = 0.3,
@@ -94,8 +94,8 @@ def process_raw(
 
     # Dynamic range normalisation (99th percentile)
     p99 = np.percentile(img, 99)
-    if p99 > 1.0:
-        img = img / p99
+    if p99 > 0.0:
+        img = img / max(float(p99), 1e-8)
     img = np.clip(img, 0, 1)
 
     # Sharpening
@@ -179,14 +179,17 @@ def _gaussian_denoise(img, sigma=0.5):
     return yuv2rgb(yuv)
 
 
-def _fft_denoise(img, keep_fraction=0.3, row_cut=False, column_cut=True):
-    ft = fftpack.fft2(img, axes=(0, 1)).copy()
-    r, c, _ = ft.shape
+def _fft_denoise(img, keep_fraction=0.3, row_cut=True, column_cut=True):
+    yuv = rgb2yuv(img)
+    y = yuv[:, :, 0]
+    ft = fftpack.fft2(y).copy()
+    r, c = ft.shape
     if row_cut:
         ft[int(r * keep_fraction):int(r * (1 - keep_fraction))] = 0
     if column_cut:
         ft[:, int(c * keep_fraction):int(c * (1 - keep_fraction))] = 0
-    return fftpack.ifft2(ft, axes=(0, 1)).real
+    yuv[:, :, 0] = fftpack.ifft2(ft).real
+    return yuv2rgb(yuv)
 
 
 def _adjust_gamma(img, gamma=2.2):

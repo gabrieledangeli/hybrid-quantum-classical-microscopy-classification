@@ -21,7 +21,12 @@ def _l2_normalize(x: torch.Tensor, dim: int = -1, eps: float = 1e-8) -> torch.Te
 
 
 def _generalized_ZX(dim: int, device=None, dtype=None) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Clock (Z) and shift (X) operators.  For ``dim=2`` returns Pauli Z, X."""
+    """Clock-like (Z) and shift (X) operators.  For ``dim=2`` returns Pauli Z, X.
+
+    For ``dim > 2`` this intentionally uses a real-valued surrogate for the
+    canonical complex clock operator ``diag(exp(2πi k / dim))`` so the bridge
+    stays in real arithmetic.
+    """
     if dim == 2:
         Z = torch.tensor([[1., 0.], [0., -1.]], device=device, dtype=dtype)
         X = torch.tensor([[0., 1.], [1., 0.]], device=device, dtype=dtype)
@@ -154,10 +159,12 @@ class MPSBridge(nn.Module):
         for i in range(self.Q):
             core = self.cores[i]()
             a = amps[:, i]
+            cc = torch.einsum("plr,bp->blr", core, a)
+            denom = torch.einsum("bl,blr,br->b", left[i], cc, right[i + 1]).abs().clamp_min(self.eps)
             for obs, out in ((self.ObsZ, z_list), (self.ObsX, x_list)):
                 oc = torch.einsum("pq,qlr->plr", obs, core)
                 fc = torch.einsum("plr,bp->blr", oc, a)
-                out.append(torch.einsum("bl,blr,br->b", left[i], fc, right[i + 1]))
+                out.append(torch.einsum("bl,blr,br->b", left[i], fc, right[i + 1]) / denom)
         beta = torch.sigmoid(self.beta_logit).unsqueeze(0)
         return beta * torch.stack(z_list, 1) + (1 - beta) * torch.stack(x_list, 1)
 
@@ -307,21 +314,21 @@ class PEPSBridge(nn.Module):
             out.append(torch.einsum("bp,pq->bq", amps[:, i], obs))
         return out
 
-    def _contract_column_single(self, col_tensors: List[torch.Tensor]) -> torch.Tensor:
+    def _contract_column_batch(self, col_tensors: List[torch.Tensor]) -> torch.Tensor:
         return torch.einsum(
-            "acde,cfgh,fijk,ilmn->dgjmehkn",
+            "zacde,zcfgh,zfijk,zilmn->zdgjmehkn",
             col_tensors[0],
             col_tensors[1],
             col_tensors[2],
             col_tensors[3],
         )
 
-    def _contract_all_columns_single(self, columns: List[torch.Tensor]) -> torch.Tensor:
-        left = torch.einsum("abcdefgh,efghijkl->ijkl", columns[0], columns[1])
-        left = torch.einsum("ijkl,ijklmnop->mnop", left, columns[2])
-        return torch.einsum("mnop,mnopqrst->", left, columns[3])
+    def _contract_all_columns_batch(self, columns: List[torch.Tensor]) -> torch.Tensor:
+        left = torch.einsum("zabcdefgh,zefghijkl->zijkl", columns[0], columns[1])
+        left = torch.einsum("zijkl,zijklmnop->zmnop", left, columns[2])
+        return torch.einsum("zmnop,zmnopqrst->z", left, columns[3])
 
-    def _column_from_sites_single(
+    def _column_from_sites_batch(
         self,
         site_tensors: List[torch.Tensor],
         col: int,
@@ -331,35 +338,30 @@ class PEPSBridge(nn.Module):
         if replacement is not None:
             row, tensor = replacement
             tensors[row] = tensor
-        return self._contract_column_single(tensors)
+        return self._contract_column_batch(tensors)
 
     def _exact_expectations(
         self,
         site_tensors: List[torch.Tensor],
         obs_site_tensors: List[torch.Tensor],
     ) -> torch.Tensor:
-        B = site_tensors[0].shape[0]
-        batch_outputs = []
+        # The lattice size is fixed at 4x4, so the site loop is cheap. Keep
+        # the contraction batched across samples to avoid Python overhead on B.
+        base_columns = [self._column_from_sites_batch(site_tensors, col) for col in range(self.COLS)]
+        denom = self._contract_all_columns_batch(base_columns).abs().clamp_min(self.eps)
 
-        for b in range(B):
-            sample_sites = [tensor[b] for tensor in site_tensors]
-            base_columns = [self._column_from_sites_single(sample_sites, col) for col in range(self.COLS)]
-            denom = self._contract_all_columns_single(base_columns).abs().clamp_min(self.eps)
+        outputs = []
+        for site in range(self.Q):
+            row, col = divmod(site, self.COLS)
+            columns = list(base_columns)
+            columns[col] = self._column_from_sites_batch(
+                site_tensors,
+                col,
+                replacement=(row, obs_site_tensors[site]),
+            )
+            outputs.append(self._contract_all_columns_batch(columns) / denom)
 
-            outputs = []
-            for site in range(self.Q):
-                row, col = divmod(site, self.COLS)
-                columns = list(base_columns)
-                columns[col] = self._column_from_sites_single(
-                    sample_sites,
-                    col,
-                    replacement=(row, obs_site_tensors[site][b]),
-                )
-                outputs.append(self._contract_all_columns_single(columns) / denom)
-
-            batch_outputs.append(torch.stack(outputs))
-
-        return torch.tanh(torch.stack(batch_outputs, 0))
+        return torch.tanh(torch.stack(outputs, 1))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         amps = self._encode(x)
@@ -397,7 +399,7 @@ class TTNBridge(nn.Module):
     """
 
     N_LEAVES = 16
-    VALID_OUTPUTS = (1, 2, 4, 8)
+    VALID_OUTPUTS = (4, 8)
 
     def __init__(
         self,
@@ -535,9 +537,11 @@ class PennyLaneQuantumLayer(nn.Module):
                     qml.RX(weights[layer, i, 0], wires=i)
                     qml.RY(weights[layer, i, 1], wires=i)
                     qml.RZ(weights[layer, i, 2], wires=i)
-                for i in range(n_qubits - 1):
-                    qml.CNOT(wires=[i, i + 1])
-                qml.CNOT(wires=[n_qubits - 1, 0])
+                if n_qubits > 1:
+                    for i in range(n_qubits - 1):
+                        qml.CNOT(wires=[i, i + 1])
+                    if n_qubits > 2:
+                        qml.CNOT(wires=[n_qubits - 1, 0])
             return [qml.expval(qml.PauliZ(i)) for i in range(n_qubits)]
 
         self.qlayer = qml.qnn.TorchLayer(circuit, {"weights": (n_layers, n_qubits, 3)})
@@ -552,12 +556,31 @@ _FEAT_DIM = {"resnet18": 512, "resnet34": 512, "resnet50": 2048}
 
 
 class _ResNetFeatureExtractor(nn.Module):
-    """Pretrained ResNet backbone (FC removed).
+    """ResNet backbone with the final FC layer removed.
 
-    Supports custom weight loading with lenient key matching.
+    Args:
+        arch: One of ``resnet18``/``resnet34``/``resnet50``.
+        weights_path: Optional path to custom weights (e.g. RetCCL). If given,
+            *pretrained* is ignored and the custom checkpoint is loaded with
+            lenient key matching.
+        pretrained: When ``True`` and *weights_path* is ``None``, load
+            ImageNet-pretrained torchvision weights. When ``False``, the
+            backbone is randomly initialised.
+        freeze: When ``True``, freeze every parameter except ``layer4`` (the
+            final residual stage), enabling efficient fine-tuning. Note that
+            this differs from :func:`resnet_model`: there the kept-trainable
+            set is ``layer4 + fc`` because the head lives on the same module;
+            here the head (TN bridge + VQC) is downstream so only ``layer4``
+            is trainable inside the extractor.
     """
 
-    def __init__(self, arch: str = "resnet18", weights_path: Optional[str] = None, freeze: bool = True) -> None:
+    def __init__(
+        self,
+        arch: str = "resnet18",
+        weights_path: Optional[str] = None,
+        pretrained: bool = True,
+        freeze: bool = True,
+    ) -> None:
         super().__init__()
         arch = arch.lower().strip()
         if arch not in _FEAT_DIM:
@@ -576,9 +599,12 @@ class _ResNetFeatureExtractor(nn.Module):
             m = build_fn(weights=None)
             self._load_custom(m, weights_path)
             print(f"[Backbone] Loaded custom weights ({arch}) from {weights_path}")
-        else:
+        elif pretrained:
             m = build_fn(weights=default_w)
             print(f"[Backbone] ImageNet-pretrained {arch} ({self.feature_dim}-d)")
+        else:
+            m = build_fn(weights=None)
+            print(f"[Backbone] Randomly-initialised {arch} ({self.feature_dim}-d)")
 
         self.backbone = nn.Sequential(*list(m.children())[:-1])
 
@@ -646,6 +672,7 @@ class HybridTNClassifier(nn.Module):
         bridge_type: str = "mps",
         backbone: str = "resnet18",
         backbone_weights: Optional[str] = None,
+        pretrained: bool = True,
     ) -> None:
         super().__init__()
         bridge_type = bridge_type.lower().strip()
@@ -660,7 +687,12 @@ class HybridTNClassifier(nn.Module):
         self.n_classes = n_classes
         self.n_qubits = n_qubits
 
-        self.resnet = _ResNetFeatureExtractor(arch=backbone, weights_path=backbone_weights, freeze=freeze_resnet)
+        self.resnet = _ResNetFeatureExtractor(
+            arch=backbone,
+            weights_path=backbone_weights,
+            pretrained=pretrained,
+            freeze=freeze_resnet,
+        )
         feat_dim = self.resnet.feature_dim
 
         if feat_dim % n_qubits:
@@ -706,6 +738,7 @@ def hybrid_tn_model(
     tn_bridge: str = "mps",
     backbone: str = "resnet18",
     backbone_weights: Optional[str] = None,
+    pretrained: bool = True,
 ) -> HybridTNClassifier:
     """Factory for `HybridTNClassifier`."""
     return HybridTNClassifier(
@@ -719,4 +752,5 @@ def hybrid_tn_model(
         bridge_type=tn_bridge,
         backbone=backbone,
         backbone_weights=backbone_weights,
+        pretrained=pretrained,
     )
