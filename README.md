@@ -96,6 +96,7 @@ HQCNNxLargeScaleMedicalImages/
     |   +-- __init__.py
     |   +-- augmentation.py     # Augmentation pipelines & seeding
     |   +-- dataset.py          # Dataset classes (RAW & RGB)
+    |   +-- export_raw_scale100.py  # New acquisition -> synthetic raw_scale100 TIFF
     |   +-- utils.py            # I/O, CV splits, sampling helpers
     +-- models/
     |   +-- __init__.py
@@ -167,11 +168,46 @@ data/
 
 Pass `--data_dir ./data` (or the actual path) when launching training. If omitted, the CLI falls back to `MICROSCOPY_ROOT` from `.env`, then to `./data`.
 
-### Supported classes (16 leukocyte subtypes)
+### Supported classes (15 leukocyte subtypes)
 
-`BAS`, `EBO`, `EOS`, `KSC`, `LYA`, `LYT`, `MMZ`, `MOB`, `MON`, `MYB`, `MYO`, `NGB`, `NGS`, `PMB`, `PMO`, `UNC`
+`BAS`, `EBO`, `EOS`, `KSC`, `LYA`, `LYT`, `MMZ`, `MOB`, `MON`, `MYB`, `MYO`, `NGB`, `NGS`, `PMB`, `PMO`
 
 Classes below `--min_samples_per_class` can be **dropped** or **merged** into a single `RARE` class. The default `15` is chosen so that each class still contributes at least 10 training samples both with the default 3-fold CV and with a 70/30 stratified shuffle split.
+
+Use `--exclude_classes` to remove specific labels entirely before thresholding, for example `--exclude_classes UNC` when your annotations still contain that label.
+
+By default the loader raises an error when an annotation points to a missing image file. Set `--missing_image_policy drop` to skip those annotations instead.
+
+### Exporting a new acquisition as synthetic RAW
+
+If you have a new microscope acquisition folder containing
+`AVG_M_Red.tiff`, `AVG_M_Green.tiff`, `AVG_M_Blue.tiff`, and
+`ExposureTime.txt`, you can export a `raw_scale100`-compatible TIFF with:
+
+```bash
+python -m scripts.data.export_raw_scale100 "C:\Users\gabriele.dangeli\Dataset\microscopy\Ma190_lame2_cell12"
+```
+
+By default the exporter:
+
+- exposure-normalises the RGB channel averages
+- center-crops to a square field of view
+- resizes to `256x256`
+- packs the result into a single-channel `RGGB` Bayer-style mosaic
+- calibrates a global gain against `images/raw_scale100`
+- writes a float64 TIFF named `<acquisition_dir>\<name>_raw_scale100.tiff`
+
+Useful options:
+
+```bash
+python -m scripts.data.export_raw_scale100 <acquisition_dir> ^
+    --crop_box TOP LEFT HEIGHT WIDTH ^
+    --output "C:\path\to\custom_name.tiff" ^
+    --global_gain 3.9
+```
+
+The exported TIFF is designed to be loadable by the analysis notebook and by
+the static RAW ISP pipeline.
 
 ---
 
@@ -223,6 +259,8 @@ python -m scripts.train \
 python -m scripts.train \
     --dataset MicroscopyRGB \
     --data_dir ./data \
+    --exclude_classes UNC \
+    --missing_image_policy drop \
     --classifier_network resnet50 \
     --classifier_pretrained \
     --augmentation strong \
@@ -240,7 +278,7 @@ Run `python -m scripts.train --help` for the full list. Key groups:
 
 | Group | Key flags |
 |---|---|
-| **Dataset** | `--dataset`, `--data_dir`, `--min_samples_per_class`, `--below_threshold_strategy` |
+| **Dataset** | `--dataset`, `--data_dir`, `--min_samples_per_class`, `--exclude_classes`, `--below_threshold_strategy`, `--missing_image_policy` |
 | **Cross-validation** | `--n_splits`, `--cv_strategy`, `--seed`, `--train_size` |
 | **Imbalance** | `--imbalance_handling`, `--sampler_mode`, `--undersample_strength` |
 | **Processing** | `--processing_mode`, `--sp_debayer`, `--sp_sharpening`, `--sp_denoising` |

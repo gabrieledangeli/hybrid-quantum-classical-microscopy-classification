@@ -15,7 +15,7 @@ from .utils import list_images_in_dir, load_image
 
 VALID_CLASSES = [
     "BAS", "EBO", "EOS", "KSC", "LYA", "LYT", "MMZ", "MOB",
-    "MON", "MYB", "MYO", "NGB", "NGS", "PMB", "PMO", "UNC",
+    "MON", "MYB", "MYO", "NGB", "NGS", "PMB", "PMO",
 ]
 
 # ── Factory ───────────────────────────────────────────────────────────────
@@ -26,8 +26,10 @@ def get_dataset(
     root_dir: str,
     intensity_ratio: float = 1.0,
     min_samples_per_class: int = 15,  # Default 15 keeps >= 10 train samples with the default 3-fold CV or 70/30 shuffle split.
+    exclude_classes: Optional[List[str]] = None,
     below_threshold_strategy: str = "drop",
     rare_class_name: str = "RARE",
+    missing_image_policy: str = "error",
 ) -> Dataset:
     """Instantiate the requested dataset variant."""
     constructors = {
@@ -41,8 +43,10 @@ def get_dataset(
         root_dir=root_dir,
         intensity_ratio=intensity_ratio,
         min_samples_per_class=min_samples_per_class,
+        exclude_classes=exclude_classes,
         below_threshold_strategy=below_threshold_strategy,
         rare_class_name=rare_class_name,
+        missing_image_policy=missing_image_policy,
     )
 
 
@@ -182,8 +186,10 @@ class MicroscopyDataset(ImageFolderDataset):
         transform: Optional[Callable] = None,
         bits: int = 16,
         min_samples_per_class: int = 15,  # Default 15 keeps >= 10 train samples with the default 3-fold CV or 70/30 shuffle split.
+        exclude_classes: Optional[List[str]] = None,
         below_threshold_strategy: str = "drop",
         rare_class_name: str = "RARE",
+        missing_image_policy: str = "error",
     ) -> None:
         if intensity_ratio != 1.0:
             raise ValueError("Only intensity_ratio=1.0 is supported for RAW images.")
@@ -191,14 +197,20 @@ class MicroscopyDataset(ImageFolderDataset):
             raise ValueError(f"min_samples_per_class must be >= 1, got {min_samples_per_class}")
         if below_threshold_strategy not in ("drop", "merge_to_rare"):
             raise ValueError(f"Unknown strategy: '{below_threshold_strategy}'.")
+        if missing_image_policy not in ("error", "drop"):
+            raise ValueError(f"Unknown missing image policy: '{missing_image_policy}'.")
 
         self.root_dir = root_dir
         self.img_dir = os.path.join(
             root_dir, "images", f"{self._IMAGE_DIR_PREFIX}{int(intensity_ratio * 100):03d}"
         )
         self.min_samples_per_class = min_samples_per_class
+        self.requested_excluded_classes = sorted(
+            {cls.strip() for cls in (exclude_classes or []) if cls.strip()}
+        )
         self.below_threshold_strategy = below_threshold_strategy
         self.rare_class_name = rare_class_name
+        self.missing_image_policy = missing_image_policy
 
         if not os.path.isdir(self.img_dir):
             raise FileNotFoundError(f"Image directory not found: {self.img_dir}")
@@ -210,7 +222,13 @@ class MicroscopyDataset(ImageFolderDataset):
         stems, class_labels_raw = self._read_label_file(label_file)
 
         label_counts = Counter(class_labels_raw)
-        self.valid_classes_list = [c for c in VALID_CLASSES if label_counts.get(c, 0) > 0]
+        self.excluded_classes = [
+            c for c in self.requested_excluded_classes if label_counts.get(c, 0) > 0
+        ]
+        self.valid_classes_list = [
+            c for c in VALID_CLASSES
+            if label_counts.get(c, 0) > 0 and c not in self.requested_excluded_classes
+        ]
 
         class_counts_raw = {c: label_counts.get(c, 0) for c in self.valid_classes_list}
         eligible = [c for c in self.valid_classes_list if class_counts_raw[c] >= min_samples_per_class]
@@ -231,23 +249,31 @@ class MicroscopyDataset(ImageFolderDataset):
         self.original_to_mapped_class = dict(class_mapping)
 
         # Resolve actual on-disk paths (handles subclass-specific extensions)
-        # and fail fast if annotations reference missing images.
+        # and optionally drop missing-image annotations.
         filtered: List[Tuple[str, str]] = []
-        missing_stems: List[str] = []
+        missing_samples: List[Tuple[str, str]] = []
         for stem, cls in zip(stems, class_labels_raw):
-            if cls not in selected_classes or stem in self._INVALID_STEMS:
+            if (
+                cls in self.requested_excluded_classes
+                or cls not in selected_classes
+                or stem in self._INVALID_STEMS
+            ):
                 continue
             path = self._resolve_image_path(stem)
             if path is None:
-                missing_stems.append(stem)
+                missing_samples.append((stem, cls))
                 continue
             filtered.append((path, class_mapping[cls]))
 
-        if missing_stems:
-            preview = ", ".join(missing_stems[:5])
-            suffix = "..." if len(missing_stems) > 5 else ""
+        self.missing_stems = [stem for stem, _ in missing_samples]
+        self.missing_class_counts = Counter(cls for _, cls in missing_samples)
+        self.missing_stem_count = len(missing_samples)
+
+        if missing_samples and missing_image_policy == "error":
+            preview = ", ".join(self.missing_stems[:5])
+            suffix = "..." if len(self.missing_stems) > 5 else ""
             raise FileNotFoundError(
-                f"{len(missing_stems)} annotated stem(s) were not found under {self.img_dir}: "
+                f"{len(self.missing_stems)} annotated stem(s) were not found under {self.img_dir}: "
                 f"{preview}{suffix}"
             )
         if not filtered:
@@ -321,8 +347,10 @@ class MicroscopyDatasetRGB(MicroscopyDataset):
         transform: Optional[Callable] = None,
         bits: int = 16,
         min_samples_per_class: int = 15,
+        exclude_classes: Optional[List[str]] = None,
         below_threshold_strategy: str = "drop",
         rare_class_name: str = "RARE",
+        missing_image_policy: str = "error",
     ) -> None:
         super().__init__(
             root_dir=root_dir,
@@ -330,8 +358,10 @@ class MicroscopyDatasetRGB(MicroscopyDataset):
             transform=transform,
             bits=bits,
             min_samples_per_class=min_samples_per_class,
+            exclude_classes=exclude_classes,
             below_threshold_strategy=below_threshold_strategy,
             rare_class_name=rare_class_name,
+            missing_image_policy=missing_image_policy,
         )
 
     def _normalize_image(self, img: np.ndarray) -> np.ndarray:

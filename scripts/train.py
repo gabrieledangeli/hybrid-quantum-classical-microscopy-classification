@@ -325,14 +325,24 @@ def run_train(args: argparse.Namespace) -> None:
     dataset = get_dataset(
         args.dataset, root_dir=args.data_dir,
         min_samples_per_class=args.min_samples_per_class,
+        exclude_classes=args.exclude_classes,
         below_threshold_strategy=args.below_threshold_strategy,
         rare_class_name=args.rare_class_name,
+        missing_image_policy=args.missing_image_policy,
     )
     print(f"Dataset: {type(dataset).__name__} [{len(dataset)} samples]")
+    if hasattr(dataset, "excluded_classes") and dataset.excluded_classes:
+        print(f"  Excluded classes: {dataset.excluded_classes}")
     if hasattr(dataset, "dropped_classes") and dataset.dropped_classes:
         print(f"  Dropped classes: {dataset.dropped_classes}")
     if hasattr(dataset, "merged_classes") and dataset.merged_classes:
         print(f"  Merged into '{args.rare_class_name}': {dataset.merged_classes}")
+    if (
+        hasattr(dataset, "missing_stem_count")
+        and dataset.missing_stem_count
+        and getattr(dataset, "missing_image_policy", "error") == "drop"
+    ):
+        print(f"  Dropped missing images: {dataset.missing_stem_count}")
     if hasattr(dataset, "classes"):
         print(f"  Final classes: {dataset.classes}")
 

@@ -35,11 +35,18 @@ def parse_args() -> argparse.Namespace:
                          ">= 10 train samples both with the default 3-fold CV and with "
                          "--cv_strategy shuffle_split --train_size 0.7; raise it to be "
                          "more aggressive about removing extreme rare classes.")
+    ds.add_argument("--exclude_classes", type=str, nargs="*", default=[],
+                    help="Optional class labels to exclude entirely before class-count "
+                         "thresholding, e.g. --exclude_classes UNC.")
     ds.add_argument("--below_threshold_strategy", type=str, default="drop",
                     choices=["drop", "merge_to_rare"],
                     help="How to handle classes below min_samples_per_class.")
     ds.add_argument("--rare_class_name", type=str, default="RARE",
                     help="Merged class name when strategy=merge_to_rare.")
+    ds.add_argument("--missing_image_policy", type=str, default="error",
+                    choices=["error", "drop"],
+                    help="How to handle annotations whose image file is missing from "
+                         "the selected image directory.")
 
     # -- Cross-validation --------------------------------------------------
     cv = parser.add_argument_group("Cross-validation")
