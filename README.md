@@ -2,7 +2,7 @@
 
 **Hybrid Quantum-Classical Convolutional Neural Network for Large-Scale Medical Image Classification**
 
-A research framework that combines classical deep learning (ResNet) with quantum-inspired tensor networks (MPS, PEPS) and variational quantum circuits (VQC) for the classification of microscopy blood-cell images - specifically the Matek *et al.* leukocyte morphology dataset.
+A research framework that combines classical deep learning (ResNet) with quantum-inspired tensor networks (MPS, PEPS, TTN) and variational quantum circuits (VQC) for the classification of microscopy blood-cell images.
 
 ---
 
@@ -58,7 +58,7 @@ This project investigates whether **tensor-network (TN) bridges** and **variatio
               |       Classifier        |
               |                         |
               |  +-----------------+    |
-              |  |  ResNet Backbone |    |
+              |  | ResNet Backbone |    |
               |  +--------+--------+    |
               |           |             |
               |  +--------v--------+    |
@@ -66,11 +66,11 @@ This project investigates whether **tensor-network (TN) bridges** and **variatio
               |  +--------+--------+    |
               |           |             |
               |  +--------v--------+    |
-              |  |   VQC / MLP     |    |  (PennyLane or classical)
+              |  |       VQC       |    |  (PennyLane or classical)
               |  +--------+--------+    |
               |           |             |
               |  +--------v--------+    |
-              |  |   BN -> Linear   |    |
+              |  |       MLP       |    |
               |  +-----------------+    |
               +-------------------------+
                            |
@@ -88,6 +88,7 @@ HQCNNxLargeScaleMedicalImages/
 +-- requirements.txt
 +-- notebooks/
 |   +-- microscopy_dataset_analysis.ipynb
+|   +-- MML23_dataset_analysis.ipynb
 +-- scripts/
     +-- __init__.py
     +-- config.py               # CLI argument definitions
@@ -126,7 +127,7 @@ HQCNNxLargeScaleMedicalImages/
 
 ```bash
 # Clone the repository
-git clone https://github.com/<your-org>/HQCNNxLargeScaleMedicalImages.git
+git clone https://github.com/gabrieledangeli/HQCNNxLargeScaleMedicalImages.git
 cd HQCNNxLargeScaleMedicalImages
 
 # Create a virtual environment
@@ -140,7 +141,7 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### Optional: faster quantum simulation
+### Faster quantum simulation
 
 ```bash
 pip install pennylane-lightning          # CPU adjoint (5-20x faster)
@@ -151,12 +152,12 @@ pip install pennylane-lightning[gpu]     # GPU adjoint (requires CUDA)
 
 ## Dataset Setup
 
-The framework supports the Matek *et al.* microscopy dataset and the MLL23
+The framework supports the raw microscopy dataset and the MLL23
 single-cell peripheral blood image dataset.
 
-### Matek microscopy dataset
+### Raw microscopy dataset
 
-The Matek dataset is organised as follows:
+The raw microscopy dataset is organised as follows:
 
 ```
 data/
@@ -164,7 +165,7 @@ data/
 |   +-- raw_scale100/      # 16-bit RAW Bayer TIFF images
 |   |   +-- <filename>.tiff
 |   |   +-- ...
-|   +-- rgb_scale100/      # Pre-processed RGB images (8-bit/16-bit TIFF or PNG)
+|   +-- rgb_scale100/      # Pre-processed RGB images
 |       +-- <filename>.tiff
 |       +-- ...
 +-- labels/
@@ -177,9 +178,9 @@ Pass `--data_dir ./data` (or the actual path) when launching training. If omitte
 
 `BAS`, `EBO`, `EOS`, `KSC`, `LYA`, `LYT`, `MMZ`, `MOB`, `MON`, `MYB`, `MYO`, `NGB`, `NGS`, `PMB`, `PMO`
 
-Classes below `--min_samples_per_class` can be **dropped** or **merged** into a single `RARE` class. The default `15` is chosen so that each class still contributes at least 10 training samples both with the default 3-fold CV and with a 70/30 stratified shuffle split.
+Classes below `--min_samples_per_class` can be **dropped** or **merged** into a single `RARE` class. The default `15` is chosen so that each class still contributes at least 10 training samples both with the default 5-fold CV and with a 70/30 stratified shuffle split.
 
-Use `--exclude_classes` to remove specific labels entirely before thresholding, for example `--exclude_classes UNC` when your annotations still contain that label.
+Use `--exclude_classes` to remove specific labels entirely before thresholding.
 
 By default the loader raises an error when an annotation points to a missing image file. Set `--missing_image_policy drop` to skip those annotations instead.
 
@@ -204,39 +205,6 @@ and `.tiff` files and treats the images as pre-processed RGB microscopy images.
 
 If `--data_dir` is omitted for `--dataset MLL23`, the CLI reads
 `MML23_DATA_DIR` from `.env`.
-
-### Exporting a new acquisition as synthetic RAW
-
-If you have a new microscope acquisition folder containing
-`AVG_M_Red.tiff`, `AVG_M_Green.tiff`, `AVG_M_Blue.tiff`, and
-`ExposureTime.txt`, you can export a `raw_scale100`-compatible TIFF with:
-
-```bash
-python -m scripts.data.export_raw_scale100 "C:\Users\gabriele.dangeli\Dataset\microscopy\Ma190_lame2_cell12"
-```
-
-By default the exporter:
-
-- exposure-normalises the RGB channel averages
-- center-crops to a square field of view
-- resizes to `256x256`
-- packs the result into a single-channel `RGGB` Bayer-style mosaic
-- calibrates a global gain against `images/raw_scale100`
-- writes a float64 TIFF named `<acquisition_dir>\<name>_raw_scale100.tiff`
-
-Useful options:
-
-```bash
-python -m scripts.data.export_raw_scale100 <acquisition_dir> ^
-    --crop_box TOP LEFT HEIGHT WIDTH ^
-    --output "C:\path\to\custom_name.tiff" ^
-    --global_gain 3.9
-```
-
-The exported TIFF is designed to be loadable by the analysis notebook and by
-the static RAW ISP pipeline.
-
----
 
 ## Usage
 

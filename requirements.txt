@@ -14,7 +14,7 @@ colour-demosaicing>=0.2
 matplotlib>=3.7
 Pillow>=9.5
 
-# -- Quantum simulation (optional but recommended) -----------------------
+# -- Quantum simulation --------------------------------------------------
 pennylane>=0.35
 pennylane-lightning>=0.35
 
