@@ -11,7 +11,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(_PROJECT_ROOT / ".env")
 
 MICROSCOPY_DATA_DIR = os.environ.get("MICROSCOPY_ROOT", "./data")
-MLL23_DATA_DIR = os.environ.get("MML23_DATA_DIR")
+MLL23_DATA_DIR = os.environ.get("MLL23_DATA_DIR")
 
 
 def parse_args() -> argparse.Namespace:
@@ -23,18 +23,18 @@ def parse_args() -> argparse.Namespace:
     # -- Dataset -----------------------------------------------------------
     ds = parser.add_argument_group("Dataset")
     ds.add_argument("--dataset", type=str, default="Microscopy",
-                    choices=["Microscopy", "MicroscopyRGB", "MLL23", "MML23"],
+                    choices=["Microscopy", "MicroscopyRGB", "MLL23"],
                     help="Dataset variant.")
     ds.add_argument("--data_dir", type=str, default=None,
                     help="Path to the dataset root directory. If omitted, Microscopy "
                          "datasets use MICROSCOPY_ROOT from .env or './data', while "
-                         "MLL23 uses MML23_DATA_DIR from .env.")
+                         "MLL23 uses MLL23_DATA_DIR from .env.")
     ds.add_argument("--num_workers", type=int, default=4,
                     help="DataLoader worker processes.")
     ds.add_argument("--min_samples_per_class", type=int, default=15,
                     help="Drop (or merge, see --below_threshold_strategy) any class "
                          "with fewer than this many total samples. Default 15 ensures "
-                         ">= 10 train samples both with the default 3-fold CV and with "
+                         ">= 10 train samples both with the default 5-fold CV and with "
                          "--cv_strategy shuffle_split --train_size 0.7; raise it to be "
                          "more aggressive about removing extreme rare classes.")
     ds.add_argument("--exclude_classes", type=str, nargs="*", default=[],
@@ -52,19 +52,19 @@ def parse_args() -> argparse.Namespace:
 
     # -- Cross-validation --------------------------------------------------
     cv = parser.add_argument_group("Cross-validation")
-    cv.add_argument("--n_splits", type=int, default=3,
+    cv.add_argument("--n_splits", type=int, default=5,
                     help="Number of CV splits/folds.")
-    cv.add_argument("--cv_strategy", type=str, default="shuffle_split",
+    cv.add_argument("--cv_strategy", type=str, default="kfold",
                     choices=["kfold", "shuffle_split"],
                     help="Cross-validation strategy.")
     cv.add_argument("--seed", type=int, default=20,
                     help="Random seed for reproducibility.")
     cv.add_argument("--train_size", type=float, default=0.7,
-                    help="Proportion of the dataset in the train split.")
+                    help="Proportion of the dataset in the train split (Default: 0.7).")
 
     # -- Imbalance handling ------------------------------------------------
     ib = parser.add_argument_group("Imbalance handling")
-    ib.add_argument("--imbalance_handling", type=str, default="both",
+    ib.add_argument("--imbalance_handling", type=str, default="loss",
                     choices=["sampler", "loss", "both", "none"],
                     help="Strategy to handle class imbalance.")
     ib.add_argument("--sampler_mode", type=str, default="balanced",
@@ -79,7 +79,7 @@ def parse_args() -> argparse.Namespace:
     pr = parser.add_argument_group("Image processing")
     pr.add_argument("--processing_mode", type=str, default="static",
                     choices=["parametrized", "static", "neural_network", "none"],
-                    help="RAW-to-RGB processing mode.")
+                    help="RAW-to-RGB processing mode (Mandatory for Raw images).")
     pr.add_argument("--sp_debayer", type=str, default="bilinear",
                     choices=["bilinear", "malvar2004", "menon2007"],
                     help="Demosaicing algorithm.")
@@ -174,7 +174,7 @@ def parse_args() -> argparse.Namespace:
     wb.add_argument("--wandb_project", type=str, default="hqcnn-medical",
                     help="W&B project name.")
     wb.add_argument("--wandb_entity", type=str, default=None,
-                    help="W&B entity (user/team).")
+                    help="W&B entity (user).")
     wb.add_argument("--run_name", type=str, default=None,
                     help="Base W&B run name. A fold suffix is appended automatically.")
     wb.add_argument("--wandb_watch", action="store_true",
@@ -182,9 +182,9 @@ def parse_args() -> argparse.Namespace:
 
     args = parser.parse_args()
     if args.data_dir is None:
-        if args.dataset in ("MLL23", "MML23"):
+        if args.dataset == "MLL23":
             if not MLL23_DATA_DIR:
-                parser.error("--data_dir is required for MLL23 unless MML23_DATA_DIR is set in .env.")
+                parser.error("--data_dir is required for MLL23 unless MLL23_DATA_DIR is set in .env.")
             args.data_dir = MLL23_DATA_DIR
         else:
             args.data_dir = MICROSCOPY_DATA_DIR

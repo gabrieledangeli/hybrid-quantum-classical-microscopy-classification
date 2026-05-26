@@ -190,7 +190,7 @@ For MLL23, the expected root is the folder that directly contains one
 subdirectory per class:
 
 ```
-MML23/
+MLL23/
 +-- basophil/
 |   +-- basophil_0001.TIF
 |   +-- ...
