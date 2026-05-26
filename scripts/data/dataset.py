@@ -7,6 +7,7 @@ from collections import Counter
 from typing import Any, Callable, List, Optional, Tuple
 
 import numpy as np
+from PIL import Image
 from torch.utils.data import Dataset
 
 from .utils import list_images_in_dir, load_image
@@ -16,6 +17,27 @@ from .utils import list_images_in_dir, load_image
 VALID_CLASSES = [
     "BAS", "EBO", "EOS", "KSC", "LYA", "LYT", "MMZ", "MOB",
     "MON", "MYB", "MYO", "NGB", "NGS", "PMB", "PMO",
+]
+
+MLL23_CLASSES = [
+    "basophil",
+    "eosinophil",
+    "hairy_cell",
+    "lymphocyte",
+    "lymphocyte_large_granular",
+    "lymphocyte_neoplastic",
+    "lymphocyte_reactive",
+    "metamyelocyte",
+    "monocyte",
+    "myeloblast",
+    "myelocyte",
+    "neutrophil_band",
+    "neutrophil_segmented",
+    "normoblast",
+    "plasma_cell",
+    "promyelocyte",
+    "promyelocyte_atypical",
+    "smudge_cell",
 ]
 
 # ── Factory ───────────────────────────────────────────────────────────────
@@ -35,6 +57,8 @@ def get_dataset(
     constructors = {
         "Microscopy": MicroscopyDataset,
         "MicroscopyRGB": MicroscopyDatasetRGB,
+        "MLL23": MLL23Dataset,
+        "MML23": MLL23Dataset,
     }
     if name not in constructors:
         raise ValueError(f"Unknown dataset: '{name}'. Choose from {list(constructors)}.")
@@ -378,3 +402,203 @@ class MicroscopyDatasetRGB(MicroscopyDataset):
             return img / max_val
 
         return super()._normalize_image(img)
+
+
+# -- MLL23 RGB image-folder dataset ---------------------------------------
+
+
+class MLL23Dataset(Dataset):
+    """MLL23 peripheral-blood single-cell RGB image dataset.
+
+    The expected layout is one class directory per label, for example::
+
+        MLL23/
+            basophil/
+                basophil_0001.TIF
+            eosinophil/
+                eosinophil_0001.TIF
+
+    Labels are inferred from directory names. Images are already RGB TIFFs, so
+    this dataset uses the same training path as other pre-processed RGB data.
+    """
+
+    _IMAGE_EXTENSIONS: Tuple[str, ...] = (".tif", ".tiff")
+
+    camera_parameters = None  # type: ignore[assignment]
+    dataset_mean = [0.7551, 0.6655, 0.7923]
+    dataset_std = [0.1992, 0.2667, 0.1737]
+    is_rgb = True
+
+    def __init__(
+        self,
+        root_dir: str,
+        intensity_ratio: float = 1.0,
+        transform: Optional[Callable] = None,
+        bits: int = 8,
+        min_samples_per_class: int = 15,
+        exclude_classes: Optional[List[str]] = None,
+        below_threshold_strategy: str = "drop",
+        rare_class_name: str = "RARE",
+        missing_image_policy: str = "error",
+    ) -> None:
+        if intensity_ratio != 1.0:
+            raise ValueError("Only intensity_ratio=1.0 is supported for MLL23 images.")
+        if min_samples_per_class < 1:
+            raise ValueError(f"min_samples_per_class must be >= 1, got {min_samples_per_class}")
+        if below_threshold_strategy not in ("drop", "merge_to_rare"):
+            raise ValueError(f"Unknown strategy: '{below_threshold_strategy}'.")
+        if missing_image_policy not in ("error", "drop"):
+            raise ValueError(f"Unknown missing image policy: '{missing_image_policy}'.")
+
+        self.root_dir = root_dir
+        self.img_dir = root_dir
+        self.transform = transform
+        self.bits = bits
+        self.min_samples_per_class = min_samples_per_class
+        self.requested_excluded_classes = sorted(
+            {cls.strip() for cls in (exclude_classes or []) if cls.strip()}
+        )
+        self.below_threshold_strategy = below_threshold_strategy
+        self.rare_class_name = rare_class_name
+        self.missing_image_policy = missing_image_policy
+        self.missing_stems: List[str] = []
+        self.missing_class_counts: Counter = Counter()
+        self.missing_stem_count = 0
+
+        if not os.path.isdir(root_dir):
+            raise FileNotFoundError(f"MLL23 dataset directory not found: {root_dir}")
+
+        samples_by_class = self._discover_samples(root_dir)
+        if not samples_by_class:
+            raise RuntimeError(
+                f"No MLL23 image class folders were found under {root_dir}."
+            )
+
+        label_counts = Counter({cls: len(paths) for cls, paths in samples_by_class.items()})
+        self.excluded_classes = [
+            c for c in self.requested_excluded_classes if label_counts.get(c, 0) > 0
+        ]
+        ordered_classes = [
+            c for c in MLL23_CLASSES if c in samples_by_class
+        ] + sorted(c for c in samples_by_class if c not in MLL23_CLASSES)
+        self.valid_classes_list = [
+            c for c in ordered_classes
+            if label_counts.get(c, 0) > 0 and c not in self.requested_excluded_classes
+        ]
+
+        self.class_counts_raw = {c: label_counts.get(c, 0) for c in self.valid_classes_list}
+        eligible = [
+            c for c in self.valid_classes_list
+            if self.class_counts_raw[c] >= min_samples_per_class
+        ]
+        low_count = [
+            c for c in self.valid_classes_list
+            if self.class_counts_raw[c] < min_samples_per_class
+        ]
+
+        if below_threshold_strategy == "merge_to_rare":
+            class_mapping = {c: c for c in eligible}
+            class_mapping.update({c: rare_class_name for c in low_count})
+            selected_classes = set(eligible + low_count)
+        else:
+            class_mapping = {c: c for c in eligible}
+            selected_classes = set(eligible)
+
+        self.dropped_classes = sorted(c for c in low_count if c not in selected_classes)
+        self.merged_classes = sorted(low_count) if below_threshold_strategy == "merge_to_rare" else []
+        self.original_to_mapped_class = dict(class_mapping)
+
+        filtered: List[Tuple[str, str]] = []
+        for cls in self.valid_classes_list:
+            if cls not in selected_classes:
+                continue
+            for path in samples_by_class[cls]:
+                filtered.append((path, class_mapping[cls]))
+
+        if not filtered:
+            raise RuntimeError("No valid MLL23 images remaining after filtering.")
+
+        final_paths, final_labels = zip(*filtered)
+        self.classes = sorted(set(final_labels))
+        if rare_class_name in self.classes:
+            self.classes = [c for c in self.classes if c != rare_class_name] + [rare_class_name]
+        if len(self.classes) < 2:
+            raise RuntimeError(
+                f"Need >= 2 classes after filtering, got {self.classes}. "
+                "Try lowering --min_samples_per_class or using merge_to_rare."
+            )
+
+        self.images = list(final_paths)
+        self.labels = [self.classes.index(lbl) for lbl in final_labels]
+
+    def __repr__(self) -> str:
+        lines = [f"{type(self).__name__}[{len(self.images)} images]"]
+        for i, (img, lbl) in enumerate(zip(self.images, self.labels)):
+            if i >= 10:
+                lines.append("...")
+                break
+            lines.append(f"  {os.path.basename(img)} -> {self.classes[lbl]}")
+        return "\n".join(lines)
+
+    def __len__(self) -> int:
+        return len(self.images)
+
+    def __getitem__(self, idx: int) -> Tuple[Any, Any]:
+        img = self._load_rgb_image(self.images[idx])
+        img = self._normalize_image(img)
+        if self.transform is not None:
+            img = self.transform(img)
+        return img, self.labels[idx]
+
+    def clear_cache(self) -> None:
+        return None
+
+    def _discover_samples(self, root_dir: str) -> dict:
+        samples_by_class = {}
+        for entry in sorted(os.listdir(root_dir)):
+            class_dir = os.path.join(root_dir, entry)
+            if not os.path.isdir(class_dir):
+                continue
+            paths = [
+                os.path.join(class_dir, name)
+                for name in sorted(os.listdir(class_dir))
+                if os.path.isfile(os.path.join(class_dir, name))
+                and os.path.splitext(name)[1].lower() in self._IMAGE_EXTENSIONS
+            ]
+            if paths:
+                samples_by_class[entry] = paths
+        return samples_by_class
+
+    @staticmethod
+    def _load_rgb_image(path: str) -> np.ndarray:
+        with Image.open(path) as img:
+            return np.asarray(img.convert("RGB"))
+
+    @staticmethod
+    def _ensure_hwc_rgb(img: np.ndarray) -> np.ndarray:
+        if img.ndim == 2:
+            return np.repeat(img[:, :, None], 3, axis=2)
+        if img.ndim != 3:
+            raise ValueError(f"Expected 2-D or 3-D image array, got shape {img.shape}.")
+        if img.shape[-1] in (3, 4):
+            return img[:, :, :3]
+        if img.shape[0] in (3, 4):
+            return np.moveaxis(img[:3, :, :], 0, -1)
+        if img.shape[-1] == 1:
+            return np.repeat(img, 3, axis=2)
+        raise ValueError(f"Cannot interpret image shape as RGB: {img.shape}.")
+
+    def _normalize_image(self, img: np.ndarray) -> np.ndarray:
+        source_dtype = img.dtype
+        img = img.astype(np.float32, copy=False)
+
+        if np.issubdtype(source_dtype, np.integer):
+            return img / float(np.iinfo(source_dtype).max)
+
+        if np.issubdtype(source_dtype, np.floating):
+            max_val = float(np.max(img)) if img.size else 0.0
+            if max_val <= 1.0:
+                return img
+            return img / max_val
+
+        return img / float(2 ** self.bits - 1)

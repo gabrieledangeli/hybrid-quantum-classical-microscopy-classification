@@ -10,7 +10,8 @@ from dotenv import load_dotenv
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(_PROJECT_ROOT / ".env")
 
-DATA_DIR = os.environ.get("MICROSCOPY_ROOT", "./data")
+MICROSCOPY_DATA_DIR = os.environ.get("MICROSCOPY_ROOT", "./data")
+MLL23_DATA_DIR = os.environ.get("MML23_DATA_DIR")
 
 
 def parse_args() -> argparse.Namespace:
@@ -22,11 +23,12 @@ def parse_args() -> argparse.Namespace:
     # -- Dataset -----------------------------------------------------------
     ds = parser.add_argument_group("Dataset")
     ds.add_argument("--dataset", type=str, default="Microscopy",
-                    choices=["Microscopy", "MicroscopyRGB"],
+                    choices=["Microscopy", "MicroscopyRGB", "MLL23", "MML23"],
                     help="Dataset variant.")
-    ds.add_argument("--data_dir", type=str, default=DATA_DIR,
-                    help="Path to the dataset root directory. Defaults to the "
-                         "MICROSCOPY_ROOT env var (loaded from .env) or './data'.")
+    ds.add_argument("--data_dir", type=str, default=None,
+                    help="Path to the dataset root directory. If omitted, Microscopy "
+                         "datasets use MICROSCOPY_ROOT from .env or './data', while "
+                         "MLL23 uses MML23_DATA_DIR from .env.")
     ds.add_argument("--num_workers", type=int, default=4,
                     help="DataLoader worker processes.")
     ds.add_argument("--min_samples_per_class", type=int, default=15,
@@ -179,4 +181,11 @@ def parse_args() -> argparse.Namespace:
                     help="Enable wandb.watch() gradient tracking.")
 
     args = parser.parse_args()
+    if args.data_dir is None:
+        if args.dataset in ("MLL23", "MML23"):
+            if not MLL23_DATA_DIR:
+                parser.error("--data_dir is required for MLL23 unless MML23_DATA_DIR is set in .env.")
+            args.data_dir = MLL23_DATA_DIR
+        else:
+            args.data_dir = MICROSCOPY_DATA_DIR
     return args

@@ -151,7 +151,12 @@ pip install pennylane-lightning[gpu]     # GPU adjoint (requires CUDA)
 
 ## Dataset Setup
 
-The framework expects a **Matek *et al.* microscopy dataset** organised as follows:
+The framework supports the Matek *et al.* microscopy dataset and the MLL23
+single-cell peripheral blood image dataset.
+
+### Matek microscopy dataset
+
+The Matek dataset is organised as follows:
 
 ```
 data/
@@ -168,7 +173,7 @@ data/
 
 Pass `--data_dir ./data` (or the actual path) when launching training. If omitted, the CLI falls back to `MICROSCOPY_ROOT` from `.env`, then to `./data`.
 
-### Supported classes (15 leukocyte subtypes)
+#### Supported classes (15 leukocyte subtypes)
 
 `BAS`, `EBO`, `EOS`, `KSC`, `LYA`, `LYT`, `MMZ`, `MOB`, `MON`, `MYB`, `MYO`, `NGB`, `NGS`, `PMB`, `PMO`
 
@@ -177,6 +182,28 @@ Classes below `--min_samples_per_class` can be **dropped** or **merged** into a 
 Use `--exclude_classes` to remove specific labels entirely before thresholding, for example `--exclude_classes UNC` when your annotations still contain that label.
 
 By default the loader raises an error when an annotation points to a missing image file. Set `--missing_image_policy drop` to skip those annotations instead.
+
+### MLL23 image dataset
+
+For MLL23, the expected root is the folder that directly contains one
+subdirectory per class:
+
+```
+MML23/
++-- basophil/
+|   +-- basophil_0001.TIF
+|   +-- ...
++-- eosinophil/
+|   +-- eosinophil_0001.TIF
+|   +-- ...
++-- ...
+```
+
+Labels are inferred from the class directory names. The loader accepts `.tif`
+and `.tiff` files and treats the images as pre-processed RGB microscopy images.
+
+If `--data_dir` is omitted for `--dataset MLL23`, the CLI reads
+`MML23_DATA_DIR` from `.env`.
 
 ### Exporting a new acquisition as synthetic RAW
 
@@ -268,6 +295,25 @@ python -m scripts.train \
     --rare_class_threshold 30 \
     --imbalance_handling both \
     --epochs 50
+```
+
+### MLL23 reference baseline (ResNet-18)
+
+```bash
+python -m scripts.train \
+    --dataset MLL23 \
+    --classifier_network resnet18 \
+    --classifier_pretrained \
+    --freeze_resnet_backbone \
+    --processing_mode none \
+    --augmentation weak \
+    --imbalance_handling both \
+    --cv_strategy shuffle_split \
+    --n_splits 1 \
+    --train_size 0.7 \
+    --epochs 30 \
+    --batch_size 64 \
+    --run_name mll23_resnet18_reference
 ```
 
 ---

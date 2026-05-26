@@ -6,6 +6,7 @@ from typing import List, Optional, Set
 
 import torch
 import torch.nn as nn
+from PIL import Image as _PILImage  # Preload Pillow before torchvision on Windows.
 from torchvision.models import (
     ResNet,
     ResNet18_Weights,

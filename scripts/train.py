@@ -22,6 +22,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from PIL import Image as _PILImage  # Preload Pillow before torchvision on Windows.
 import torchvision.transforms as T
 from torch.utils.data import DataLoader, WeightedRandomSampler
 from tqdm import tqdm
@@ -154,7 +155,7 @@ def validate(
 
 def _build_processor(args, dataset):
     """Return ``(processor, normalization)`` based on CLI flags."""
-    is_rgb = args.dataset == "MicroscopyRGB"
+    is_rgb = args.dataset in ("MicroscopyRGB", "MLL23", "MML23") or getattr(dataset, "is_rgb", False)
 
     if is_rgb:
         dataset.transform = T.ToTensor()
