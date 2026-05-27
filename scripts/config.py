@@ -83,11 +83,11 @@ def parse_args() -> argparse.Namespace:
     pr.add_argument("--sp_debayer", type=str, default="bilinear",
                     choices=["bilinear", "malvar2004", "menon2007"],
                     help="Demosaicing algorithm.")
-    pr.add_argument("--sp_sharpening", type=str, default="sharpening_filter",
+    pr.add_argument("--sp_sharpening", type=str, default="unsharp_masking",
                     choices=["sharpening_filter", "unsharp_masking"],
                     help="Sharpening algorithm.")
     pr.add_argument("--sp_denoising", type=str, default="gaussian_denoising",
-                    choices=["gaussian_denoising", "median_denoising", "fft_denoising"],
+                    choices=["gaussian_denoising", "median_denoising"],
                     help="Denoising algorithm.")
     pr.add_argument("--freeze_processor", action="store_true",
                     help="Freeze processor weights.")

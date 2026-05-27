@@ -1,10 +1,6 @@
 """Training entry-point for the Hybrid Quantum-Classical CNN pipeline.
 
-Usage:
-
-    python -m scripts.train --dataset Microscopy --data_dir ./data --epochs 30
-
-Or from the ``scripts/`` directory:
+Usage from the `scripts/` directory:
 
     python train.py --dataset Microscopy --data_dir ./data --epochs 30
 """
@@ -30,47 +26,25 @@ from tqdm import tqdm
 import wandb
 
 # -- Local imports ---------------------------------------------------------
-# Support both `python -m scripts.train` and direct `python train.py`
-try:
-    from scripts.config import parse_args
-    from scripts.data.augmentation import get_augmentation, set_global_seed
-    from scripts.data.dataset import Subset, get_dataset
-    from scripts.data.utils import (
-        compute_soft_undersampling_weights,
-        format_class_counts,
-        get_current_undersample_strength,
-        k_fold,
-    )
-    from scripts.models.classifiers import EndToEndModel, TensorNormalize, resnet_model
-    from scripts.models.hybrid import hybrid_tn_model
-    from scripts.models.losses import FocalLoss
-    from scripts.processing.numpy_pipeline import RawProcessingPipeline
-    from scripts.processing.torch_pipeline import (
-        NNProcessing,
-        ParametrizedProcessing,
-        RawToRGB,
-    )
-    from scripts.utils.metrics import compute_metrics
-except ImportError:
-    from config import parse_args
-    from data.augmentation import get_augmentation, set_global_seed
-    from data.dataset import Subset, get_dataset
-    from data.utils import (
-        compute_soft_undersampling_weights,
-        format_class_counts,
-        get_current_undersample_strength,
-        k_fold,
-    )
-    from models.classifiers import EndToEndModel, TensorNormalize, resnet_model
-    from models.hybrid import hybrid_tn_model
-    from models.losses import FocalLoss
-    from processing.numpy_pipeline import RawProcessingPipeline
-    from processing.torch_pipeline import (
-        NNProcessing,
-        ParametrizedProcessing,
-        RawToRGB,
-    )
-    from utils.metrics import compute_metrics
+from config import parse_args
+from data.augmentation import get_augmentation, set_global_seed
+from data.dataset import Subset, get_dataset
+from data.utils import (
+    compute_soft_undersampling_weights,
+    format_class_counts,
+    get_current_undersample_strength,
+    make_stratified_splits,
+)
+from models.classifiers import EndToEndModel, TensorNormalize, resnet_model
+from models.hybrid import hybrid_tn_model
+from models.losses import FocalLoss
+from processing.numpy_pipeline import RawProcessingPipeline
+from processing.torch_pipeline import (
+    NNProcessing,
+    ParametrizedProcessing,
+    RawToRGB,
+)
+from utils.metrics import compute_metrics
 
 # -- Device ----------------------------------------------------------------
 
@@ -155,7 +129,7 @@ def validate(
 
 def _build_processor(args, dataset):
     """Return ``(processor, normalization)`` based on CLI flags."""
-    is_rgb = args.dataset in ("MicroscopyRGB", "MLL23", "MML23") or getattr(dataset, "is_rgb", False)
+    is_rgb = args.dataset in ("MicroscopyRGB", "MLL23") or getattr(dataset, "is_rgb", False)
 
     if is_rgb:
         dataset.transform = T.ToTensor()
@@ -315,14 +289,12 @@ def _log_wandb_confusion_matrix(
 
 
 # ===========================================================================
-#  Main training routine
+#  Main
 # ===========================================================================
 
 
 def run_train(args: argparse.Namespace) -> None:
-    """Execute the full cross-validated training loop."""
-
-    # -- 1. Dataset --------------------------------------------------------
+    # -- Dataset ------------------------------------------------------------
     dataset = get_dataset(
         args.dataset, root_dir=args.data_dir,
         min_samples_per_class=args.min_samples_per_class,
@@ -331,7 +303,9 @@ def run_train(args: argparse.Namespace) -> None:
         rare_class_name=args.rare_class_name,
         missing_image_policy=args.missing_image_policy,
     )
+    print("*" * 60)
     print(f"Dataset: {type(dataset).__name__} [{len(dataset)} samples]")
+
     if hasattr(dataset, "excluded_classes") and dataset.excluded_classes:
         print(f"  Excluded classes: {dataset.excluded_classes}")
     if hasattr(dataset, "dropped_classes") and dataset.dropped_classes:
@@ -345,7 +319,16 @@ def run_train(args: argparse.Namespace) -> None:
     ):
         print(f"  Dropped missing images: {dataset.missing_stem_count}")
     if hasattr(dataset, "classes"):
-        print(f"  Final classes: {dataset.classes}")
+        final_classes = list(dataset.classes)
+        display_classes = getattr(dataset, "display_classes", None)
+        print("  Final classes:")
+        if display_classes is not None:
+            for cls, display_cls in zip(final_classes, display_classes):
+                print(f"    {cls} [{display_cls}]")
+        else:
+            for cls in final_classes:
+                print(f"    {cls}")
+    print("*" * 60)
 
     # -- 2. Reproducibility ------------------------------------------------
     set_global_seed(args.seed)
@@ -357,7 +340,7 @@ def run_train(args: argparse.Namespace) -> None:
         raise ValueError(f"--undersample_strength must be in [0, 1], got {args.undersample_strength}")
 
     # -- 3. CV splits ------------------------------------------------------
-    splits = k_fold(dataset, args.n_splits, args.seed, args.train_size, args.cv_strategy)
+    splits = make_stratified_splits(dataset, args.n_splits, args.seed, args.train_size, args.cv_strategy)
 
     for fold, (train_idx, val_idx) in enumerate(splits):
         print(f"\n{'='*60}\n  Fold {fold + 1}/{args.n_splits}\n{'='*60}")
@@ -366,22 +349,34 @@ def run_train(args: argparse.Namespace) -> None:
         config = vars(args).copy()
         config["fold"] = fold
         wandb.init(
-            project=args.wandb_project, entity=args.wandb_entity,
+            project=args.wandb_project, 
+            entity=args.wandb_entity,
             name=_make_wandb_run_name(args, fold),
             config=config,
         )
 
         class_names = list(getattr(dataset, "classes", sorted(set(dataset.labels))))
+        display_class_names = list(getattr(dataset, "display_classes", class_names))
         n_classes = len(class_names)
         train_labels = [dataset.labels[i] for i in train_idx]
         class_counts = Counter(train_labels)
 
         # Print fold distribution
         val_counts = Counter(dataset.labels[i] for i in val_idx)
-        tc = format_class_counts(class_counts, class_names)
-        vc = format_class_counts(val_counts, class_names)
-        for cn in class_names:
-            print(f"  {cn:>6s}: train={tc[cn]:4d} | val={vc[cn]:4d}")
+        tc = format_class_counts(class_counts, display_class_names)
+        vc = format_class_counts(val_counts, display_class_names)
+        name_w = max(5, max((len(cn) for cn in display_class_names), default=0))
+        count_w = max(5, len(str(max(len(train_idx), len(val_idx)))))
+        sep = f"  +{'-' * (name_w + 2)}+{'-' * (count_w + 2)}+{'-' * (count_w + 2)}+"
+        print("  Class distribution:")
+        print(sep)
+        print(f"  | {'Class':<{name_w}} | {'Train':>{count_w}} | {'Val':>{count_w}} |")
+        print(sep)
+        for cn in display_class_names:
+            print(f"  | {cn:<{name_w}} | {tc[cn]:>{count_w}d} | {vc[cn]:>{count_w}d} |")
+        print(sep)
+        print(f"  | {'Total':<{name_w}} | {len(train_idx):>{count_w}d} | {len(val_idx):>{count_w}d} |")
+        print(sep)
 
         # -- Build pipeline components -------------------------------------
         processor, normalization = _build_processor(args, dataset)
@@ -464,12 +459,12 @@ def run_train(args: argparse.Namespace) -> None:
                 sw, _ = compute_soft_undersampling_weights(train_labels, class_counts, strength)
                 dyn_sampler.weights = sw
 
-            train_loss, train_m = train_one_epoch(model, train_loader, criterion, optimizer, DEVICE, class_names)
+            train_loss, train_m = train_one_epoch(model, train_loader, criterion, optimizer, DEVICE, display_class_names)
             scheduler.step()
 
             if epoch % args.check_val_every_n_epoch == 0:
                 val_loss, val_m, val_labels, val_preds = validate(
-                    model, val_loader, criterion, DEVICE, class_names
+                    model, val_loader, criterion, DEVICE, display_class_names
                 )
                 last_val_snapshot = {
                     "epoch": epoch,

@@ -11,7 +11,7 @@ from colour_demosaicing import (
     demosaicing_CFA_Bayer_Malvar2004,
     demosaicing_CFA_Bayer_Menon2007,
 )
-from scipy import fftpack, ndimage
+from scipy import ndimage
 from scipy.signal import convolve2d
 from skimage.color import rgb2yuv, yuv2rgb
 from skimage.filters import unsharp_mask
@@ -76,7 +76,6 @@ def process_raw(
     denoising: str = "gaussian_denoising",
     median_kernel_size: int = 3,
     gaussian_sigma: float = 0.5,
-    fft_fraction: float = 0.3,
     gamma: float = 2.2,
 ) -> np.ndarray:
     """Apply the full RAW -> RGB processing pipeline."""
@@ -102,7 +101,7 @@ def process_raw(
     img = _apply_sharpening(img, sharpening, sharp_radius, sharp_amount)
 
     # Denoising
-    img = _apply_denoising(img, denoising, median_kernel_size, gaussian_sigma, fft_fraction)
+    img = _apply_denoising(img, denoising, median_kernel_size, gaussian_sigma)
 
     # Gamma correction
     img = np.clip(img, 0, 1)
@@ -141,27 +140,41 @@ def _apply_sharpening(img, method, radius, amount):
 
 def _unsharp(img, radius=1.0, amount=1.0):
     yuv = rgb2yuv(img)
-    yuv[:, :, 0] = unsharp_mask(yuv[:, :, 0], radius=radius, amount=amount, channel_axis=None, preserve_range=True)
+    yuv[:, :, 0] = unsharp_mask(
+        yuv[:, :, 0], 
+        radius=radius, 
+        amount=amount, 
+        channel_axis=None, 
+        preserve_range=True
+    )
     return yuv2rgb(yuv)
 
 
-_SHARP_KERNEL = np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]])
+_SHARP_KERNEL = np.array([
+    [ 0,  -1,  0], 
+    [-1,   5, -1], 
+    [ 0,  -1,  0]
+])
 
 
 def _conv_sharpen(img, iterations=1):
     yuv = rgb2yuv(img)
     for _ in range(iterations):
-        yuv[:, :, 0] = convolve2d(yuv[:, :, 0], _SHARP_KERNEL, "same", boundary="fill", fillvalue=0)
+        yuv[:, :, 0] = convolve2d(
+            yuv[:, :, 0], 
+            _SHARP_KERNEL, 
+            "same", 
+            boundary="fill", 
+            fillvalue=0
+        )
     return yuv2rgb(yuv)
 
 
-def _apply_denoising(img, method, median_ks, gauss_sigma, fft_frac):
+def _apply_denoising(img, method, median_ks, gauss_sigma):
     if method == "gaussian_denoising":
         return _gaussian_denoise(img, gauss_sigma)
     if method == "median_denoising":
         return _median_denoise(img, median_ks)
-    if method == "fft_denoising":
-        return _fft_denoise(img, fft_frac)
     if method != "none":
         raise ValueError(f"Unknown denoising: '{method}'.")
     return img
@@ -176,19 +189,6 @@ def _median_denoise(img, size=3):
 def _gaussian_denoise(img, sigma=0.5):
     yuv = rgb2yuv(img)
     yuv[:, :, 0] = ndimage.gaussian_filter(yuv[:, :, 0], sigma)
-    return yuv2rgb(yuv)
-
-
-def _fft_denoise(img, keep_fraction=0.3, row_cut=True, column_cut=True):
-    yuv = rgb2yuv(img)
-    y = yuv[:, :, 0]
-    ft = fftpack.fft2(y).copy()
-    r, c = ft.shape
-    if row_cut:
-        ft[int(r * keep_fraction):int(r * (1 - keep_fraction))] = 0
-    if column_cut:
-        ft[:, int(c * keep_fraction):int(c * (1 - keep_fraction))] = 0
-    yuv[:, :, 0] = fftpack.ifft2(ft).real
     return yuv2rgb(yuv)
 
 

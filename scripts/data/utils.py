@@ -11,11 +11,11 @@ import tifffile
 import torch
 from sklearn.model_selection import StratifiedKFold, StratifiedShuffleSplit
 
-# ── Constants ─────────────────────────────────────────────────────────────
+# -- Constants ----------------------------------------------------------------
 
-IMAGE_FILE_TYPES = {"dng", "png", "tif", "tiff"}
+IMAGE_FILE_TYPES = {"png", "tif", "tiff"}
 
-# ── Image I/O ─────────────────────────────────────────────────────────────
+# -- Image I/O ----------------------------------------------------------------
 
 
 def load_image(path: str) -> np.ndarray:
@@ -24,7 +24,7 @@ def load_image(path: str) -> np.ndarray:
 
 
 def list_images_in_dir(directory: str) -> List[str]:
-    """Return sorted list of absolute image paths in *directory*."""
+    """Return sorted list of absolute image paths in directory."""
     return [
         os.path.join(directory, name)
         for name in sorted(os.listdir(directory))
@@ -32,14 +32,14 @@ def list_images_in_dir(directory: str) -> List[str]:
     ]
 
 
-# ── Cross-validation ─────────────────────────────────────────────────────
+# -- Cross-validation ---------------------------------------------------------
 
 
-def k_fold(
+def make_stratified_splits(
     dataset,
     n_splits: int,
     seed: int,
-    train_size: float = 0.8,
+    train_size: float = 0.7,
     strategy: str = "kfold",
 ) -> List[Tuple[List[int], List[int]]]:
     """Create stratified cross-validation splits.
@@ -48,7 +48,9 @@ def k_fold(
         dataset: Must expose a ``.labels`` attribute (list/array of ints).
         n_splits: Number of folds or re-shuffles.
         seed: Random seed.
-        train_size: Train proportion (only for ``shuffle_split``).
+        train_size: Train proportion for ``shuffle_split`` only. With
+            ``kfold``, the train/validation ratio is determined by
+            ``n_splits`` and this argument is ignored.
         strategy: ``'kfold'`` or ``'shuffle_split'``.
 
     Returns:
@@ -63,15 +65,16 @@ def k_fold(
     min_class_count = min(class_counts.values()) if class_counts else 0
 
     if strategy == "kfold":
+        # In k-fold CV, train_size is implied by n_splits and is not used.
         if n_splits < 2:
             raise ValueError(
-                f"StratifiedKFold requires n_splits ≥ 2, got {n_splits}. "
+                f"StratifiedKFold requires n_splits >= 2, got {n_splits}. "
                 "Use --cv_strategy shuffle_split for a single train/test split."
             )
         if n_splits > min_class_count:
             raise ValueError(
                 f"n_splits={n_splits} exceeds min class count ({min_class_count}). "
-                f"Use n_splits ≤ {min_class_count}."
+                f"Use n_splits <= {min_class_count}."
             )
         cv = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=seed)
     else:
@@ -81,7 +84,7 @@ def k_fold(
             if cls_count < 2:
                 raise ValueError(
                     f"Class {cls_idx} has only {cls_count} sample(s). "
-                    "StratifiedShuffleSplit requires ≥ 2."
+                    "StratifiedShuffleSplit requires >= 2."
                 )
             cls_train = int(np.floor(cls_count * train_size))
             cls_val = cls_count - cls_train
@@ -99,7 +102,7 @@ def k_fold(
     ]
 
 
-# ── Sampling helpers ─────────────────────────────────────────────────────
+# -- Sampling helpers ---------------------------------------------------------
 
 
 def compute_soft_undersampling_weights(

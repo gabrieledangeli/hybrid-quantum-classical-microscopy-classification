@@ -88,7 +88,7 @@ HQCNNxLargeScaleMedicalImages/
 +-- requirements.txt
 +-- notebooks/
 |   +-- microscopy_dataset_analysis.ipynb
-|   +-- MML23_dataset_analysis.ipynb
+|   +-- MLL23_dataset_analysis.ipynb
 +-- scripts/
     +-- __init__.py
     +-- config.py               # CLI argument definitions
@@ -204,7 +204,7 @@ Labels are inferred from the class directory names. The loader accepts `.tif`
 and `.tiff` files and treats the images as pre-processed RGB microscopy images.
 
 If `--data_dir` is omitted for `--dataset MLL23`, the CLI reads
-`MML23_DATA_DIR` from `.env`.
+`MLL23_DATA_DIR` from `.env`.
 
 ## Usage
 

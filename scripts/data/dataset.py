@@ -12,7 +12,7 @@ from torch.utils.data import Dataset
 
 from .utils import list_images_in_dir, load_image
 
-# ── Constants ─────────────────────────────────────────────────────────────
+# -- Constants ----------------------------------------------------------------
 
 VALID_CLASSES = [
     "BAS", "EBO", "EOS", "KSC", "LYA", "LYT", "MMZ", "MOB",
@@ -40,14 +40,35 @@ MLL23_CLASSES = [
     "smudge_cell",
 ]
 
-# ── Factory ───────────────────────────────────────────────────────────────
+MLL23_DISPLAY_NAMES = {
+    "basophil": "BAS",
+    "eosinophil": "EOS",
+    "hairy_cell": "HC",
+    "lymphocyte": "LYM",
+    "lymphocyte_large_granular": "LGL",
+    "lymphocyte_neoplastic": "LYM-N",
+    "lymphocyte_reactive": "LYM-R",
+    "metamyelocyte": "META",
+    "monocyte": "MON",
+    "myeloblast": "MYB",
+    "myelocyte": "MYC",
+    "neutrophil_band": "BAND",
+    "neutrophil_segmented": "SEG",
+    "normoblast": "NORM",
+    "plasma_cell": "PLAS",
+    "promyelocyte": "PROM",
+    "promyelocyte_atypical": "A-PROM",
+    "smudge_cell": "SMUDGE",
+}
+
+# -- Factory ----------------------------------------------------------------------------
 
 
 def get_dataset(
     name: str,
     root_dir: str,
     intensity_ratio: float = 1.0,
-    min_samples_per_class: int = 15,  # Default 15 keeps >= 10 train samples with the default 3-fold CV or 70/30 shuffle split.
+    min_samples_per_class: int = 15,  # Default 15 keeps >= 10 train samples with the default 5-fold CV or 70/30 shuffle split.
     exclude_classes: Optional[List[str]] = None,
     below_threshold_strategy: str = "drop",
     rare_class_name: str = "RARE",
@@ -58,7 +79,6 @@ def get_dataset(
         "Microscopy": MicroscopyDataset,
         "MicroscopyRGB": MicroscopyDatasetRGB,
         "MLL23": MLL23Dataset,
-        "MML23": MLL23Dataset,
     }
     if name not in constructors:
         raise ValueError(f"Unknown dataset: '{name}'. Choose from {list(constructors)}.")
@@ -74,7 +94,7 @@ def get_dataset(
     )
 
 
-# ── Base dataset ──────────────────────────────────────────────────────────
+# -- Base dataset -------------------------------------------------------------
 
 
 class ImageFolderDataset(Dataset):
@@ -113,7 +133,7 @@ class ImageFolderDataset(Dataset):
             if i >= 10:
                 lines.append("...")
                 break
-            lines.append(f"  {img}  →  {lbl}")
+            lines.append(f"  {img}  ->  {lbl}")
         return "\n".join(lines)
 
     def __len__(self) -> int:
@@ -140,7 +160,7 @@ class ImageFolderDataset(Dataset):
         return None
 
 
-# ── Subset ────────────────────────────────────────────────────────────────
+# -- Subset -------------------------------------------------------------------
 
 
 class Subset(Dataset):
@@ -153,7 +173,7 @@ class Subset(Dataset):
         transform: Optional[Callable] = None,
     ) -> None:
         self.dataset = dataset
-        self.indices = indices if indices is not None else list(range(len(dataset)))  # type: ignore[arg-type]
+        self.indices = indices if indices is not None else list(range(len(dataset)))
         self.transform = transform
 
     def __len__(self) -> int:
@@ -169,16 +189,16 @@ class Subset(Dataset):
         return x, y
 
 
-# ── Microscopy RAW dataset ───────────────────────────────────────────────
+# -- Microscopy RAW dataset ---------------------------------------------------
 
 
 class MicroscopyDataset(ImageFolderDataset):
-    """Microscopy dataset for **RAW** Bayer-pattern images.
+    """Microscopy dataset for RAW Bayer-pattern images.
 
     Camera parameters and normalisation statistics are dataset-level constants
     used by the image-processing pipeline and model normalisation layer.
 
-    Subclasses (e.g. :class:`MicroscopyDatasetRGB`) only need to override the
+    Subclasses (e.g. MicroscopyDatasetRGB) only need to override the
     class-level attributes ``_IMAGE_EXTENSIONS`` and ``_IMAGE_DIR_PREFIX``,
     plus any colour/bit-depth specific normalisation.
     """
@@ -188,6 +208,7 @@ class MicroscopyDataset(ImageFolderDataset):
     _IMAGE_DIR_PREFIX: str = "raw_scale"
 
     # Camera intrinsics
+    # TODO: Verify these camera parameters, especially the negative white-balance value.
     black_level = [9.834368023181512e-06] * 4
     white_balance = [-0.6567, 1.9673, 3.5304]
     colour_matrix = [
@@ -311,7 +332,7 @@ class MicroscopyDataset(ImageFolderDataset):
             self.classes = [c for c in self.classes if c != rare_class_name] + [rare_class_name]
         if len(self.classes) < 2:
             raise RuntimeError(
-                f"Need ≥ 2 classes after filtering, got {self.classes}. "
+                f"Need >= 2 classes after filtering, got {self.classes}. "
                 "Try lowering --min_samples_per_class or using merge_to_rare."
             )
 
@@ -320,7 +341,7 @@ class MicroscopyDataset(ImageFolderDataset):
         self.transform = transform
         self.bits = bits
 
-    # ── Private helpers ───────────────────────────────────────────────────
+    # -- Private helpers ------------------------------------------------------
 
     def _resolve_image_path(self, stem: str) -> Optional[str]:
         """Return the on-disk path for ``stem`` honouring subclass extensions."""
@@ -332,7 +353,7 @@ class MicroscopyDataset(ImageFolderDataset):
 
     @staticmethod
     def _read_label_file(path: str) -> Tuple[List[str], List[str]]:
-        """Parse the annotation file → ``(stems, class_labels)``."""
+        """Parse the annotation file -> ``(stems, class_labels)``."""
         stems: list[str] = []
         labels: list[str] = []
         with open(path, "rb") as fh:
@@ -346,7 +367,7 @@ class MicroscopyDataset(ImageFolderDataset):
         return stems, labels
 
 
-# ── Microscopy RGB dataset ───────────────────────────────────────────────
+# -- Microscopy RGB dataset ---------------------------------------------------
 
 
 class MicroscopyDatasetRGB(MicroscopyDataset):
@@ -360,7 +381,7 @@ class MicroscopyDatasetRGB(MicroscopyDataset):
     _IMAGE_EXTENSIONS = (".tiff", ".tif", ".png")
     _IMAGE_DIR_PREFIX = "rgb_scale"
 
-    camera_parameters = None  # type: ignore[assignment]
+    camera_parameters = None  
     dataset_mean = [0.5566, 0.4607, 0.5923]
     dataset_std = [0.0983, 0.1417, 0.0667]
 
@@ -424,7 +445,7 @@ class MLL23Dataset(Dataset):
 
     _IMAGE_EXTENSIONS: Tuple[str, ...] = (".tif", ".tiff")
 
-    camera_parameters = None  # type: ignore[assignment]
+    camera_parameters = None 
     dataset_mean = [0.7551, 0.6655, 0.7923]
     dataset_std = [0.1992, 0.2667, 0.1737]
     is_rgb = True
@@ -441,8 +462,12 @@ class MLL23Dataset(Dataset):
         rare_class_name: str = "RARE",
         missing_image_policy: str = "error",
     ) -> None:
+        # Kept for get_dataset() compatibility; MLL23 has no scale-specific folders.
         if intensity_ratio != 1.0:
-            raise ValueError("Only intensity_ratio=1.0 is supported for MLL23 images.")
+            raise ValueError(
+                "MLL23Dataset does not use intensity_ratio because images are read "
+                f"directly from class folders; expected 1.0, got {intensity_ratio}."
+            )
         if min_samples_per_class < 1:
             raise ValueError(f"min_samples_per_class must be >= 1, got {min_samples_per_class}")
         if below_threshold_strategy not in ("drop", "merge_to_rare"):
@@ -530,6 +555,9 @@ class MLL23Dataset(Dataset):
 
         self.images = list(final_paths)
         self.labels = [self.classes.index(lbl) for lbl in final_labels]
+        self.display_classes = [
+            MLL23_DISPLAY_NAMES.get(cls, cls) for cls in self.classes
+        ]
 
     def __repr__(self) -> str:
         lines = [f"{type(self).__name__}[{len(self.images)} images]"]
@@ -573,21 +601,7 @@ class MLL23Dataset(Dataset):
     def _load_rgb_image(path: str) -> np.ndarray:
         with Image.open(path) as img:
             return np.asarray(img.convert("RGB"))
-
-    @staticmethod
-    def _ensure_hwc_rgb(img: np.ndarray) -> np.ndarray:
-        if img.ndim == 2:
-            return np.repeat(img[:, :, None], 3, axis=2)
-        if img.ndim != 3:
-            raise ValueError(f"Expected 2-D or 3-D image array, got shape {img.shape}.")
-        if img.shape[-1] in (3, 4):
-            return img[:, :, :3]
-        if img.shape[0] in (3, 4):
-            return np.moveaxis(img[:3, :, :], 0, -1)
-        if img.shape[-1] == 1:
-            return np.repeat(img, 3, axis=2)
-        raise ValueError(f"Cannot interpret image shape as RGB: {img.shape}.")
-
+    
     def _normalize_image(self, img: np.ndarray) -> np.ndarray:
         source_dtype = img.dtype
         img = img.astype(np.float32, copy=False)

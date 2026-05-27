@@ -1,4 +1,4 @@
-"""Differentiable (PyTorch) RAW-to-RGB processing modules."""
+"""Differentiable RAW-to-RGB processing modules in PyTorch."""
 
 from __future__ import annotations
 
@@ -14,8 +14,17 @@ except ImportError:
 
 # -- Constant kernels / matrices -------------------------------------------
 
-K_G = torch.tensor([[0, 1, 0], [1, 4, 1], [0, 1, 0]], dtype=torch.float32) / 4
-K_RB = torch.tensor([[1, 2, 1], [2, 4, 2], [1, 2, 1]], dtype=torch.float32) / 4
+K_G = torch.tensor([
+    [0, 1, 0], 
+    [1, 4, 1], 
+    [0, 1, 0]
+], dtype=torch.float32) / 4
+
+K_RB = torch.tensor([
+    [1, 2, 1], 
+    [2, 4, 2], 
+    [1, 2, 1]
+], dtype=torch.float32) / 4
 
 M_RGB2YUV = torch.tensor([
     [0.299, 0.587, 0.114],
@@ -37,7 +46,11 @@ K_BLUR = torch.tensor([
     [6.9625e-08, 2.8089e-05, 2.0755e-04, 2.8089e-05, 6.9625e-08],
 ], dtype=torch.float32)
 
-K_SHARP = torch.tensor([[0, -1, 0], [-1, 5, -1], [0, -1, 0]], dtype=torch.float32)
+K_SHARP = torch.tensor([
+    [0, -1, 0], 
+    [-1, 5, -1], 
+    [0, -1, 0]
+], dtype=torch.float32)
 
 _DEFAULT_CAMERA = ([0., 0., 0., 0.], [1., 1., 1.], [1., 0., 0., 0., 1., 0., 0., 0., 1.])
 

@@ -11,7 +11,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-# ── Reproducibility ──────────────────────────────────────────────────────
+# -- Reproducibility ----------------------------------------------------------
 
 
 def set_global_seed(seed: int) -> None:
@@ -21,14 +21,14 @@ def set_global_seed(seed: int) -> None:
     random.seed(seed)
 
 
-# ── Vectorised batched augmentation ──────────────────────────────────────
+# -- Vectorised batched augmentation -----------------------------------------
 
 
 class BatchedAugmentation(nn.Module):
     """Per-sample randomised augmentation, vectorised across the batch.
 
     Each sample in a ``(B, C, H, W)`` tensor independently samples its own
-    augmentation parameters (flips, lossless 90° rotations, optional Gaussian
+    augmentation parameters (flips, lossless 90-degree rotations, optional Gaussian
     noise, optional sharpness adjustment) without Python-level per-sample
     iteration. A ``(C, H, W)`` input is also accepted.
     """
@@ -117,7 +117,7 @@ class BatchedAugmentation(nn.Module):
         return factor * x + (1.0 - factor) * blurred
 
 
-# ── Pre-built pipelines ──────────────────────────────────────────────────
+# -- Pre-built pipelines ------------------------------------------------------
 
 _WEAK = BatchedAugmentation(hflip=True, vflip=True, rot90=True)
 
