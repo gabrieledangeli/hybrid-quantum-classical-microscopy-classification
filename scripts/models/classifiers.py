@@ -27,9 +27,9 @@ _RESNET_REGISTRY = {
 
 
 def resnet_model(
+    fc_out_features: int,
     model_name: str = "resnet18",
     pretrained: bool = True,
-    fc_out_features: int = 2,
     freeze_backbone: bool = False,
 ) -> ResNet:
     """Build a ResNet with a replaced final FC layer.
@@ -42,11 +42,16 @@ def resnet_model(
     which has no FC head (the head lives downstream as TN bridge + VQC), so
     ``freeze=True`` there leaves only ``layer4`` trainable.
     """
-    key = model_name.lower().strip()
-    if key not in _RESNET_REGISTRY:
+    model_name = model_name.lower().strip()
+    if model_name not in _RESNET_REGISTRY:
         raise ValueError(f"Unknown model: '{model_name}'. Choose from {list(_RESNET_REGISTRY)}.")
+    if freeze_backbone and not pretrained:
+        raise ValueError(
+            "freeze_backbone=True requires pretrained=True; otherwise stem/layer1-3 "
+            "would remain randomly initialized and frozen."
+        )
 
-    build_fn, default_weights = _RESNET_REGISTRY[key]
+    build_fn, default_weights = _RESNET_REGISTRY[model_name]
     model = build_fn(weights=default_weights if pretrained else None)
     model.fc = nn.Linear(model.fc.in_features, fc_out_features, bias=True)
 

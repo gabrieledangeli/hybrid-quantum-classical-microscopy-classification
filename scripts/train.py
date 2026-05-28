@@ -149,12 +149,13 @@ def _build_processor(args, dataset):
         return None, TensorNormalize(dataset.dataset_mean, dataset.dataset_std)
 
     mosaic_norm = TensorNormalize([0.5663, 0.1401, 0.0731], [0.097, 0.0423, 0.008])
-
+    # TODO: Study the implementation of these parametrized processing modules.
     if args.processing_mode == "parametrized":
         return ParametrizedProcessing(camera_parameters=dataset.camera_parameters, batch_norm_output=True), None
     if args.processing_mode == "neural_network":
         return NNProcessing(batch_norm_output=True), mosaic_norm
     # "none"
+    # TODO: Study whether this minimal RawToRGB path is a useful baseline.
     return RawToRGB(reduce_size=True, out_channels=3), mosaic_norm
 
 
@@ -174,12 +175,15 @@ def _build_classifier(args, n_classes: int):
             backbone_weights=args.backbone_weights,
             pretrained=args.classifier_pretrained,
         )
-    return resnet_model(
-        model_name=args.classifier_network,
-        pretrained=args.classifier_pretrained,
-        fc_out_features=n_classes,
-        freeze_backbone=args.freeze_resnet_backbone,
-    )
+    elif args.classifier_network in ("resnet18", "resnet34", "resnet50"):
+        return resnet_model(
+            fc_out_features=n_classes,
+            model_name=args.classifier_network,
+            pretrained=args.classifier_pretrained,
+            freeze_backbone=args.freeze_resnet_backbone,
+        )
+    else:
+        raise ValueError(f"Unsupported classifier network: {args.classifier_network}.")
 
 
 def _build_criterion(args, class_counts: Counter, n_classes: int, device: torch.device):

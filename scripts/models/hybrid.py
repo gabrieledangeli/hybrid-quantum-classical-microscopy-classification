@@ -13,6 +13,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from models.classifiers import _RESNET_REGISTRY
+
 # -- Maths helpers ---------------------------------------------------------
 
 
@@ -24,7 +26,7 @@ def _generalized_ZX(dim: int, device=None, dtype=None) -> Tuple[torch.Tensor, to
     """Clock-like (Z) and shift (X) operators.  For ``dim=2`` returns Pauli Z, X.
 
     For ``dim > 2`` this intentionally uses a real-valued surrogate for the
-    canonical complex clock operator ``diag(exp(2πi k / dim))`` so the bridge
+    canonical complex clock operator ``diag(exp(2*pi*i*k / dim))`` so the bridge
     stays in real arithmetic.
     """
     if dim == 2:
@@ -559,52 +561,42 @@ class _ResNetFeatureExtractor(nn.Module):
     """ResNet backbone with the final FC layer removed.
 
     Args:
-        arch: One of ``resnet18``/``resnet34``/``resnet50``.
-        weights_path: Optional path to custom weights (e.g. RetCCL). If given,
+        backbone: One of ``resnet18``/``resnet34``/``resnet50``.
+        weights_path: Optional path to custom weights. If given,
             *pretrained* is ignored and the custom checkpoint is loaded with
             lenient key matching.
         pretrained: When ``True`` and *weights_path* is ``None``, load
             ImageNet-pretrained torchvision weights. When ``False``, the
             backbone is randomly initialised.
         freeze: When ``True``, freeze every parameter except ``layer4`` (the
-            final residual stage), enabling efficient fine-tuning. Note that
-            this differs from :func:`resnet_model`: there the kept-trainable
-            set is ``layer4 + fc`` because the head lives on the same module;
-            here the head (TN bridge + VQC) is downstream so only ``layer4``
-            is trainable inside the extractor.
+            final residual stage), enabling efficient fine-tuning.
     """
 
     def __init__(
         self,
-        arch: str = "resnet18",
+        backbone: str = "resnet18",
         weights_path: Optional[str] = None,
         pretrained: bool = True,
         freeze: bool = True,
     ) -> None:
         super().__init__()
-        arch = arch.lower().strip()
-        if arch not in _FEAT_DIM:
-            raise ValueError(f"Unknown arch '{arch}'. Choose from {list(_FEAT_DIM)}.")
-        self.feature_dim = _FEAT_DIM[arch]
+        backbone = backbone.lower().strip()
+        if backbone not in _FEAT_DIM:
+            raise ValueError(f"Unknown backbone '{backbone}'. Choose from {list(_FEAT_DIM)}.")
+        self.feature_dim = _FEAT_DIM[backbone]
 
-        from torchvision import models as tvm
-        factory = {
-            "resnet18": (tvm.resnet18, tvm.ResNet18_Weights.DEFAULT),
-            "resnet34": (tvm.resnet34, tvm.ResNet34_Weights.DEFAULT),
-            "resnet50": (tvm.resnet50, tvm.ResNet50_Weights.DEFAULT),
-        }
-        build_fn, default_w = factory[arch]
+        build_fn, default_w = _RESNET_REGISTRY[backbone]
 
         if weights_path:
             m = build_fn(weights=None)
             self._load_custom(m, weights_path)
-            print(f"[Backbone] Loaded custom weights ({arch}) from {weights_path}")
+            print(f"[Backbone] Loaded custom weights ({backbone}) from {weights_path}")
         elif pretrained:
             m = build_fn(weights=default_w)
-            print(f"[Backbone] ImageNet-pretrained {arch} ({self.feature_dim}-d)")
+            print(f"[Backbone] ImageNet-pretrained {backbone} ({self.feature_dim}-d)")
         else:
             m = build_fn(weights=None)
-            print(f"[Backbone] Randomly-initialised {arch} ({self.feature_dim}-d)")
+            print(f"[Backbone] Randomly-initialised {backbone} ({self.feature_dim}-d)")
 
         self.backbone = nn.Sequential(*list(m.children())[:-1])
 
@@ -613,9 +605,6 @@ class _ResNetFeatureExtractor(nn.Module):
                 p.requires_grad = False
             for p in m.layer4.parameters():
                 p.requires_grad = True
-            trainable = sum(p.numel() for p in self.backbone.parameters() if p.requires_grad)
-            total = sum(p.numel() for p in self.backbone.parameters())
-            print(f"[Backbone] Frozen: {total - trainable:,} | Trainable (layer4): {trainable:,}")
 
     @staticmethod
     def _load_custom(model: nn.Module, path: str) -> None:
@@ -656,7 +645,6 @@ class _ResNetFeatureExtractor(nn.Module):
 class HybridTNClassifier(nn.Module):
     """ResNet -> TN bridge (MPS/PEPS/TTN) -> VQC -> BN -> linear.
 
-    Drop-in replacement for a plain ResNet classifier.
     Input:  ``(B, 3, H, W)``  Output: ``(B, n_classes)``
     """
 
@@ -668,7 +656,7 @@ class HybridTNClassifier(nn.Module):
         tn_phys_dim: int = 2,
         bridge_hidden_dim: int = 128,
         vqc_layers: int = 2,
-        freeze_resnet: bool = True,
+        freeze_resnet: bool = False,
         bridge_type: str = "mps",
         backbone: str = "resnet18",
         backbone_weights: Optional[str] = None,
@@ -677,18 +665,21 @@ class HybridTNClassifier(nn.Module):
         super().__init__()
         bridge_type = bridge_type.lower().strip()
         if bridge_type == "peps" and n_qubits != PEPSBridge.N_SITES:
-            print(f"[PEPS] Using fixed 4x4 topology ({PEPSBridge.N_SITES} sites); ignoring n_qubits={n_qubits}.")
-            n_qubits = PEPSBridge.N_SITES
+            raise ValueError(
+                f"PEPS uses a fixed 4x4 topology ({PEPSBridge.N_SITES} sites); "
+                f"got n_qubits={n_qubits}."
+            )
         if bridge_type == "ttn" and n_qubits not in TTNBridge.VALID_OUTPUTS:
             raise ValueError(
-                f"TTN uses a fixed {TTNBridge.N_LEAVES}-leaf tree; choose n_qubits from {TTNBridge.VALID_OUTPUTS}."
+                f"TTN uses a fixed {TTNBridge.N_LEAVES}-leaf tree; "
+                f"expected n_qubits in {TTNBridge.VALID_OUTPUTS}, got {n_qubits}."
             )
 
         self.n_classes = n_classes
         self.n_qubits = n_qubits
 
         self.resnet = _ResNetFeatureExtractor(
-            arch=backbone,
+            backbone=backbone,
             weights_path=backbone_weights,
             pretrained=pretrained,
             freeze=freeze_resnet,
@@ -703,11 +694,26 @@ class HybridTNClassifier(nn.Module):
             )
 
         if bridge_type == "mps":
-            self.tn_bridge = MPSBridge(feat_dim, n_qubits, tn_bond_dim, tn_phys_dim, bridge_hidden_dim)
+            self.tn_bridge = MPSBridge(feat_dim, 
+                                       n_qubits, 
+                                       tn_bond_dim, 
+                                       tn_phys_dim, 
+                                       bridge_hidden_dim
+                                    )
         elif bridge_type == "peps":
-            self.tn_bridge = PEPSBridge(feat_dim, n_qubits, tn_bond_dim, tn_phys_dim, bridge_hidden_dim)
+            self.tn_bridge = PEPSBridge(feat_dim, 
+                                        n_qubits, 
+                                        tn_bond_dim, 
+                                        tn_phys_dim, 
+                                        bridge_hidden_dim
+                                    )
         elif bridge_type == "ttn":
-            self.tn_bridge = TTNBridge(feat_dim, n_qubits, tn_bond_dim, tn_phys_dim, bridge_hidden_dim)
+            self.tn_bridge = TTNBridge(feat_dim, 
+                                       n_qubits, 
+                                       tn_bond_dim, 
+                                       tn_phys_dim, 
+                                       bridge_hidden_dim
+                                    )
         else:
             raise ValueError(f"Unknown bridge_type '{bridge_type}'.")
 
@@ -734,7 +740,7 @@ def hybrid_tn_model(
     tn_phys_dim: int = 2,
     tn_hidden_dim: int = 128,
     vqc_layers: int = 2,
-    freeze_resnet: bool = True,
+    freeze_resnet: bool = False,
     tn_bridge: str = "mps",
     backbone: str = "resnet18",
     backbone_weights: Optional[str] = None,
