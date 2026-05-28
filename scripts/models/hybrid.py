@@ -64,7 +64,7 @@ class _SpectralCore(nn.Module):
 class MPSBridge(nn.Module):
     """Feature to qudit expectation values via a Matrix Product State.
 
-    1. Split features into Q chunks; encode each into amplitudes + gate.
+    1. Split features into Q chunks; encode each into gated amplitudes.
     2. Contract through MPS cores (bidirectional environments).
     3. Per-site Z/X expectations blended with learnable beta.
     4. Skip connection + learnable mixing + bias.
@@ -117,71 +117,89 @@ class MPSBridge(nn.Module):
 
     # -- encoding ---------------------------------------------------------
 
-    def _encode(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def _encode(self, x: torch.Tensor) -> torch.Tensor:
         B = x.shape[0]
         chunks = x.view(B, self.Q, self.Fpc)
-        amps, gates = [], []
+        amps = []
         for i in range(self.Q):
             h = F.gelu(self.fc1[i](self.ln[i](chunks[:, i])))
             logits = self.fc_logits[i](h) / self.temperature
             a = torch.sqrt(F.softmax(logits, dim=-1).clamp(min=self.eps))
-            amps.append(_l2_normalize(a, eps=self.eps))
-            gates.append(torch.sigmoid(self.fc_gate[i](h)).squeeze(-1))
-        return torch.stack(amps, 1), torch.stack(gates, 1)
+            gate = torch.sigmoid(self.fc_gate[i](h))
+            uniform = torch.full_like(a, 1.0 / math.sqrt(self.P))
+            amps.append(_l2_normalize(gate * a + (1.0 - gate) * uniform, eps=self.eps))
+        return torch.stack(amps, 1)
 
     # -- environment contraction ------------------------------------------
 
-    def _left_envs(self, amps: torch.Tensor) -> List[torch.Tensor]:
+    def _left_envs(self, amps: torch.Tensor, cores: List[torch.Tensor]) -> List[torch.Tensor]:
         B = amps.shape[0]
         envs = [torch.ones(B, 1, device=amps.device, dtype=amps.dtype)]
         state = envs[0]
         for i in range(self.Q):
-            c = torch.einsum("bp,plr->blr", amps[:, i], self.cores[i]())
+            c = torch.einsum("bp,plr->blr", amps[:, i], cores[i])
             state = torch.einsum("bl,blr->br", state, c)
             if (i + 1) % self.renorm_stride == 0:
                 state = _l2_normalize(state, eps=self.eps)
             envs.append(state)
         return envs
 
-    def _right_envs(self, amps: torch.Tensor) -> List[torch.Tensor]:
+    def _right_envs(self, amps: torch.Tensor, cores: List[torch.Tensor]) -> List[torch.Tensor]:
         B = amps.shape[0]
-        envs: list = [None] * (self.Q + 1)  # type: ignore[list-item]
+        envs: list = [None] * (self.Q + 1)
         state = torch.ones(B, 1, device=amps.device, dtype=amps.dtype)
         envs[self.Q] = state
         for i in reversed(range(self.Q)):
-            c = torch.einsum("plr,bp->blr", self.cores[i](), amps[:, i])
+            c = torch.einsum("plr,bp->blr", cores[i], amps[:, i])
             state = torch.einsum("blr,br->bl", c, state)
             if (self.Q - i) % self.renorm_stride == 0:
                 state = _l2_normalize(state, eps=self.eps)
             envs[i] = state
         return envs
 
-    def _expectations(self, amps, left, right) -> torch.Tensor:
-        z_list, x_list = [], []
+    # -- observable amplitudes --------------------------------------------
+
+    def _observable_amps(self, amps: torch.Tensor) -> List[torch.Tensor]:
+        out = []
         for i in range(self.Q):
-            core = self.cores[i]()
+            beta = torch.sigmoid(self.beta_logit[i])
+            obs = beta * self.ObsZ + (1.0 - beta) * self.ObsX
+            out.append(torch.einsum("bp,pq->bq", amps[:, i], obs))
+        return out
+
+    def _expectations(
+        self,
+        amps: torch.Tensor,
+        left: List[torch.Tensor],
+        right: List[torch.Tensor],
+        cores: List[torch.Tensor],
+        obs_amps: List[torch.Tensor],
+    ) -> torch.Tensor:
+        out = []
+        for i in range(self.Q):
+            core = cores[i]
             a = amps[:, i]
             cc = torch.einsum("plr,bp->blr", core, a)
             denom = torch.einsum("bl,blr,br->b", left[i], cc, right[i + 1]).abs().clamp_min(self.eps)
-            for obs, out in ((self.ObsZ, z_list), (self.ObsX, x_list)):
-                oc = torch.einsum("pq,qlr->plr", obs, core)
-                fc = torch.einsum("plr,bp->blr", oc, a)
-                out.append(torch.einsum("bl,blr,br->b", left[i], fc, right[i + 1]) / denom)
-        beta = torch.sigmoid(self.beta_logit).unsqueeze(0)
-        return beta * torch.stack(z_list, 1) + (1 - beta) * torch.stack(x_list, 1)
+            fc = torch.einsum("plr,bp->blr", core, obs_amps[i])
+            out.append(torch.einsum("bl,blr,br->b", left[i], fc, right[i + 1]) / denom)
+        return torch.stack(out, 1)
 
     # -- forward ----------------------------------------------------------
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        amps, gates = self._encode(x)
-        amps = amps * gates.unsqueeze(-1)
-        z_mps = self._expectations(amps, self._left_envs(amps), self._right_envs(amps))
+        amps = self._encode(x)
+        cores = [core() for core in self.cores]
+        left = self._left_envs(amps, cores)
+        right = self._right_envs(amps, cores)
+        obs_amps = self._observable_amps(amps)
+        z_mps = self._expectations(amps, left, right, cores, obs_amps)
         z_skip = torch.tanh(self.skip_proj(x)) * self.site_scale
         alpha = torch.sigmoid(self.mix_logit)
         return alpha * z_mps + (1 - alpha) * z_skip + self.bias
 
 
-# -- PEPS bridge -----------------------------------------------------------
+# -- PEPS core -------------------------------------------------------------
 
 
 class _PEPSSpectralCore(nn.Module):
@@ -206,6 +224,9 @@ class _PEPSSpectralCore(nn.Module):
         return torch.exp(self.log_scale) * (self.base / norm)
 
 
+# -- PEPS bridge -----------------------------------------------------------
+
+
 class PEPSBridge(nn.Module):
     """Exact 4x4 PEPS bridge.
 
@@ -218,7 +239,7 @@ class PEPSBridge(nn.Module):
 
     ROWS = 4
     COLS = 4
-    N_SITES = ROWS * COLS
+    N_SITES = ROWS * COLS   # 16 sites fixed by the exact contraction topology
     MAX_BOND_DIM = 8
 
     def __init__(
@@ -233,14 +254,20 @@ class PEPSBridge(nn.Module):
     ) -> None:
         super().__init__()
         if n_sites != self.N_SITES:
-            print(f"[PEPS] Exact topology is fixed to 4x4 ({self.N_SITES} sites); ignoring n_sites={n_sites}.")
+            raise ValueError(
+                f"PEPSBridge uses a fixed 4x4 exact-contraction topology "
+                f"({self.N_SITES} sites); got n_sites={n_sites}."
+            )
         if bond_dim < 1:
             raise ValueError(f"bond_dim must be >= 1, got {bond_dim}.")
         if feature_dim % self.N_SITES:
             raise ValueError(f"feature_dim must be divisible by {self.N_SITES} PEPS sites.")
         if bond_dim > self.MAX_BOND_DIM:
-            print(f"[PEPS] Exact contraction supports bond_dim <= {self.MAX_BOND_DIM}; using {self.MAX_BOND_DIM}.")
-            bond_dim = self.MAX_BOND_DIM
+            raise ValueError(
+                f"PEPSBridge exact contraction supports bond_dim <= {self.MAX_BOND_DIM}; "
+                f"got bond_dim={bond_dim}. Increase MAX_BOND_DIM only after reviewing "
+                "the contraction memory and compute cost."
+            )
 
         self.Q = self.N_SITES
         self.D = bond_dim
@@ -285,8 +312,12 @@ class PEPSBridge(nn.Module):
         self.register_buffer("ObsZ", Z)
         self.register_buffer("ObsX", X)
 
+    # -- indexing ---------------------------------------------------------
+
     def _idx(self, r: int, c: int) -> int:
         return r * self.COLS + c
+
+    # -- encoding ---------------------------------------------------------
 
     def _encode(self, x: torch.Tensor) -> torch.Tensor:
         B = x.shape[0]
@@ -300,6 +331,8 @@ class PEPSBridge(nn.Module):
             uniform = torch.full_like(a, 1.0 / math.sqrt(self.P))
             amps.append(_l2_normalize(gate * a + (1.0 - gate) * uniform, eps=self.eps))
         return torch.stack(amps, 1)
+
+    # -- physical contractions -------------------------------------------
 
     def _contract_physical(
         self,
@@ -315,6 +348,8 @@ class PEPSBridge(nn.Module):
             obs = beta * self.ObsZ + (1.0 - beta) * self.ObsX
             out.append(torch.einsum("bp,pq->bq", amps[:, i], obs))
         return out
+
+    # -- column contraction -----------------------------------------------
 
     def _contract_column_batch(self, col_tensors: List[torch.Tensor]) -> torch.Tensor:
         return torch.einsum(
@@ -342,6 +377,8 @@ class PEPSBridge(nn.Module):
             tensors[row] = tensor
         return self._contract_column_batch(tensors)
 
+    # -- expectation values -----------------------------------------------
+
     def _exact_expectations(
         self,
         site_tensors: List[torch.Tensor],
@@ -365,6 +402,8 @@ class PEPSBridge(nn.Module):
 
         return torch.tanh(torch.stack(outputs, 1))
 
+    # -- forward ----------------------------------------------------------
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         amps = self._encode(x)
         cores = [core() for core in self.cores]
@@ -374,6 +413,9 @@ class PEPSBridge(nn.Module):
         z_skip = torch.tanh(self.skip_proj(x)) * self.site_scale
         alpha = torch.sigmoid(self.mix_logit)
         return alpha * z + (1.0 - alpha) * z_skip + self.bias
+
+
+# -- TTN core --------------------------------------------------------------
 
 
 class _TTNCore(nn.Module):
@@ -388,6 +430,9 @@ class _TTNCore(nn.Module):
     def forward(self) -> torch.Tensor:
         norm = self.base.reshape(-1).norm(p=2) + self.eps
         return torch.exp(self.log_scale) * (self.base / norm)
+
+
+# -- TTN bridge ------------------------------------------------------------
 
 
 class TTNBridge(nn.Module):
@@ -458,6 +503,8 @@ class TTNBridge(nn.Module):
         self.register_buffer("ObsZ", Z)
         self.register_buffer("ObsX", X)
 
+    # -- encoding ---------------------------------------------------------
+
     def _encode(self, x: torch.Tensor) -> torch.Tensor:
         B = x.shape[0]
         chunks = x.view(B, self.N_LEAVES, self.Fpl)
@@ -470,6 +517,8 @@ class TTNBridge(nn.Module):
             uniform = torch.full_like(amp, 1.0 / math.sqrt(self.P))
             leaves.append(_l2_normalize(gate * amp + (1.0 - gate) * uniform, eps=self.eps))
         return torch.stack(leaves, 1)
+
+    # -- tree contraction -------------------------------------------------
 
     def _contract_level(self, states: torch.Tensor, cores: nn.ModuleList) -> torch.Tensor:
         left = states[:, 0::2]
@@ -484,11 +533,15 @@ class TTNBridge(nn.Module):
             states = self._contract_level(states, level)
         return states
 
+    # -- measurement ------------------------------------------------------
+
     def _measure(self, states: torch.Tensor) -> torch.Tensor:
         z = torch.einsum("bqd,df,bqf->bq", states, self.ObsZ, states)
         x = torch.einsum("bqd,df,bqf->bq", states, self.ObsX, states)
         beta = torch.sigmoid(self.beta_logit).unsqueeze(0)
         return beta * z + (1.0 - beta) * x
+
+    # -- forward ----------------------------------------------------------
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         leaves = self._encode(x)
