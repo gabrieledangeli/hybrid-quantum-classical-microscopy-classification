@@ -7,7 +7,6 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 from sklearn.metrics import (
     balanced_accuracy_score,
-    confusion_matrix,
     f1_score,
     precision_score,
     recall_score,
@@ -21,7 +20,7 @@ def compute_metrics(
 ) -> Dict[str, Any]:
     """Compute classification metrics suited for imbalanced multi-class problems.
 
-    Returns a dict with aggregate and per-class metrics plus confusion matrix.
+    Returns a dict with aggregate and per-class metrics.
     """
     metrics: Dict[str, Any] = {}
 
@@ -50,16 +49,9 @@ def compute_metrics(
         })
     metrics["per_class"] = per_class
 
-    metrics["confusion_matrix"] = confusion_matrix(labels, preds, labels=labels_eval)
     metrics["cm_labels"] = [
         class_names[i] if class_names and i < len(class_names) else str(i)
         for i in labels_eval
     ]
-
-    counts = np.bincount(labels.astype(int), minlength=n_classes)
-    if class_names:
-        metrics["label_counts"] = {class_names[i]: int(counts[i]) for i in range(n_classes)}
-    else:
-        metrics["label_counts"] = {str(i): int(v) for i, v in enumerate(counts)}
 
     return metrics

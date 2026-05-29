@@ -78,7 +78,7 @@ def train_one_epoch(
         inputs, labels = inputs.to(device), labels.to(device)
         optimizer.zero_grad()
 
-        outputs = model(inputs, labels=labels) if isinstance(model, EndToEndModel) else model(inputs)
+        outputs = model(inputs, labels=labels) # Pass labels for conditional augmentation if enabled.
         loss = criterion(outputs, labels)
         loss.backward()
         optimizer.step()
@@ -257,20 +257,54 @@ def _build_scheduler(args, optimizer):
     )
 
 
-def _make_wandb_run_name(args: argparse.Namespace, fold: int) -> str:
-    """Generate a fold-specific W&B run name."""
-    fold_suffix = f"fold{fold + 1}of{args.n_splits}"
+def _build_sampler(args, train_labels: List[int], class_counts: Counter) -> Tuple[Optional[WeightedRandomSampler], bool]:
+    """Return ``(sampler, is_dynamic)`` for class-imbalance handling."""
+    if args.imbalance_handling not in ("sampler", "both"):
+        return None, False
+
+    if args.sampler_mode == "soft_undersample":
+        # Ramp soft undersampling over the first 10 epochs to avoid abrupt distribution shifts.
+        init_strength = get_current_undersample_strength(1, args.undersample_strength, 10)
+        weights, _ = compute_soft_undersampling_weights(train_labels, class_counts, init_strength)
+        return WeightedRandomSampler(weights, len(train_labels), replacement=True), True
+
+    weights = torch.DoubleTensor([
+        (1.0 / class_counts[train_label]) if class_counts[train_label] > 0 else 0.0
+        for train_label in train_labels
+    ])
+    return WeightedRandomSampler(weights, len(train_labels), replacement=True), False
+
+
+def _make_base_run_name(args: argparse.Namespace, started_at: datetime) -> str:
+    """Generate the shared base name for W&B and local results."""
+    started_label = started_at.strftime("%d-%m-%Y_%Hh%M")
     if args.run_name:
-        return f"{args.run_name}_{fold_suffix}"
+        return f"{started_label}_{args.run_name}"
 
     model_tag = args.classifier_network
     if args.classifier_network == "hybrid_tn":
-        model_tag = f"{args.classifier_network}-{args.backbone}-{args.tn_bridge}"
+        model_tag = f"{args.classifier_network}-{args.backbone}-{args.tn_bridge}{args.n_qubits}"
 
     return (
-        f"{datetime.now():%d-%m}_{model_tag}"
-        f"_aug-{args.augmentation}_bal-{args.imbalance_handling}"
-        f"_{fold_suffix}"
+        f"{started_label}_{model_tag}"
+        f"_loss-{args.loss_fn}"
+        f"_aug-{args.augmentation}_imbalance_handling-{args.imbalance_handling}"
+    )
+
+
+def _make_fold_run_name(base_run_name: str, fold: int, n_splits: int) -> str:
+    """Generate a fold-specific run name."""
+    return f"{base_run_name}_fold{fold + 1}of{n_splits}"
+
+
+def _make_run_dir(args: argparse.Namespace, base_run_name: str, fold: int) -> str:
+    """Generate the local results directory for one fold."""
+    return os.path.join(
+        "results",
+        args.dataset,
+        args.processing_mode,
+        base_run_name,
+        f"fold_{fold + 1}",
     )
 
 
@@ -292,6 +326,17 @@ def _log_wandb_confusion_matrix(
         })
     except Exception as exc:
         print(f"[Warning] W&B confusion matrix log failed for '{key}': {exc}")
+
+
+def _log_wandb_per_class_table(key: str, per_class: List[Dict[str, Any]]) -> None:
+    """Log best-epoch per-class precision, recall, and F1 to W&B."""
+    try:
+        table = wandb.Table(columns=["Class", "Best Precision", "Best Recall", "Best F1"])
+        for row in per_class:
+            table.add_data(row["class"], row["precision"], row["recall"], row["f1"])
+        wandb.log({key: table})
+    except Exception as exc:
+        print(f"[Warning] W&B per-class table log failed for '{key}': {exc}")
 
 
 # ===========================================================================
@@ -345,6 +390,8 @@ def run_train(args: argparse.Namespace) -> None:
     if not 0.0 <= args.undersample_strength <= 1.0:
         raise ValueError(f"--undersample_strength must be in [0, 1], got {args.undersample_strength}")
 
+    base_run_name = _make_base_run_name(args, datetime.now())
+
     # -- 3. CV splits ------------------------------------------------------
     splits = make_stratified_splits(dataset, args.n_splits, args.seed, args.train_size, args.cv_strategy)
 
@@ -352,12 +399,16 @@ def run_train(args: argparse.Namespace) -> None:
         print(f"\n{'='*60}\n  Fold {fold + 1}/{args.n_splits}\n{'='*60}")
 
         # W&B init
+        fold_run_name = _make_fold_run_name(base_run_name, fold, args.n_splits)
         config = vars(args).copy()
-        config["fold"] = fold
+        config["base_run_name"] = base_run_name
+        config["fold"] = fold + 1
+        config["fold_index"] = fold
         wandb.init(
             project=args.wandb_project, 
             entity=args.wandb_entity,
-            name=_make_wandb_run_name(args, fold),
+            name=fold_run_name,
+            group=base_run_name,
             config=config,
         )
 
@@ -405,92 +456,94 @@ def run_train(args: argparse.Namespace) -> None:
             freeze_processor=args.freeze_processor,
         ).to(DEVICE)
 
-        # -- Loss / Optimizer / Scheduler ----------------------------------
+        # -- Loss / Optimizer / Scheduler / Sampler ----------------------------------
         criterion = _build_criterion(args, class_counts, n_classes, DEVICE)
         optimizer = _build_optimizer(args, model)
         scheduler = _build_scheduler(args, optimizer)
-
-        # -- Sampler -------------------------------------------------------
-        use_sampler = args.imbalance_handling in ("sampler", "both")
-        dynamic_soft = False
-        sampler = None
-        dyn_sampler = None
-
-        if use_sampler:
-            if args.sampler_mode == "soft_undersample":
-                dynamic_soft = True
-                init_strength = get_current_undersample_strength(1, args.undersample_strength, args.undersample_warmup_epochs)
-                sw, _ = compute_soft_undersampling_weights(train_labels, class_counts, init_strength)
-                dyn_sampler = WeightedRandomSampler(sw, len(train_idx), replacement=True)
-                sampler = dyn_sampler
-            else:
-                sw = torch.DoubleTensor([
-                    (1.0 / class_counts[train_label]) if class_counts[train_label] > 0 else 0.0
-                    for train_label in train_labels
-                ])
-                sampler = WeightedRandomSampler(sw, len(train_idx), replacement=True)
+        sampler, dynamic_soft = _build_sampler(args, train_labels, class_counts)
 
         # -- DataLoaders ---------------------------------------------------
         nw = max(0, args.num_workers)
-        ldr_kw: dict = {"batch_size": args.batch_size, "num_workers": nw, "pin_memory": DEVICE.type == "cuda"}
+        ldr_kw: dict = {
+            "batch_size": args.batch_size,
+            "num_workers": nw,
+            "pin_memory": DEVICE.type == "cuda",
+        }
         if nw > 0:
             ldr_kw["persistent_workers"] = True
 
         train_loader = DataLoader(
             Subset(dataset, train_idx),
-            sampler=sampler, shuffle=(sampler is None), **ldr_kw,
+            sampler=sampler,
+            shuffle=(sampler is None),
+            **ldr_kw,
         )
-        val_loader = DataLoader(Subset(dataset, val_idx), shuffle=False, **ldr_kw)
+        val_loader = DataLoader(
+            Subset(dataset, val_idx),
+            shuffle=False,
+            **ldr_kw,
+        )
 
         # -- Save dir ------------------------------------------------------
-        run_dir = os.path.join("results", args.dataset, args.processing_mode, f"fold_{fold}")
+        run_dir = _make_run_dir(args, base_run_name, fold)
         if args.save_model:
             os.makedirs(run_dir, exist_ok=True)
-            with open(os.path.join(run_dir, "state_dict.txt"), "w") as f:
-                f.write(f"Command: python {' '.join(sys.argv)}\n")
-                for k, v in {**vars(args), "fold": fold}.items():
+            with open(os.path.join(run_dir, "run_config.txt"), "w", encoding="utf-8") as f:
+                run_config = {
+                    "base_run": base_run_name,
+                    "fold": fold + 1,
+                    **vars(args),
+                }
+                for k, v in run_config.items():
                     f.write(f"{k}={v}\n")
 
         # -- Training loop -------------------------------------------------
         best_f1 = float("-inf")
         best_epoch: Optional[int] = None
         best_val_snapshot: Optional[Dict[str, Any]] = None
-        last_val_snapshot: Optional[Dict[str, Any]] = None
         if args.wandb_watch:
             wandb.watch(model, log="gradients", log_freq=100)
 
         pbar = tqdm(range(1, args.epochs + 1), desc="Epochs")
         for epoch in pbar:
             # Update dynamic sampler if needed
-            if dynamic_soft and dyn_sampler is not None:
-                strength = get_current_undersample_strength(epoch, args.undersample_strength, args.undersample_warmup_epochs)
+            if dynamic_soft and sampler is not None:
+                strength = get_current_undersample_strength(epoch, args.undersample_strength, 10)
                 sw, _ = compute_soft_undersampling_weights(train_labels, class_counts, strength)
-                dyn_sampler.weights = sw
+                sampler.weights = sw
 
-            train_loss, train_m = train_one_epoch(model, train_loader, criterion, optimizer, DEVICE, display_class_names)
+            train_loss, train_m = train_one_epoch(
+                model,
+                train_loader,
+                criterion,
+                optimizer,
+                DEVICE,
+                display_class_names
+            )
 
             val_loss, val_m, val_labels, val_preds = validate(
-                model, val_loader, criterion, DEVICE, display_class_names
+                model,
+                val_loader,
+                criterion,
+                DEVICE,
+                display_class_names
             )
-            last_val_snapshot = {
-                "epoch": epoch,
-                "metrics": val_m,
-                "labels": val_labels.copy(),
-                "preds": val_preds.copy(),
-            }
 
             pbar.set_postfix(loss=f"{val_loss:.4f}", mF1=f"{val_m['macro_f1']:.4f}", bAcc=f"{val_m['balanced_accuracy']:.4f}")
 
             log_dict = {
-                "train/loss": train_loss, "train/acc": train_m["accuracy"], "train/macro_f1": train_m["macro_f1"],
-                "val/loss": val_loss, "val/acc": val_m["accuracy"], "val/balanced_acc": val_m["balanced_accuracy"],
-                "val/macro_f1": val_m["macro_f1"], "val/weighted_f1": val_m["weighted_f1"],
-                "val/macro_precision": val_m["macro_precision"], "val/macro_recall": val_m["macro_recall"],
+                "train/loss": train_loss,
+                "train/acc": train_m["accuracy"],
+                "train/macro_f1": train_m["macro_f1"],
+                "val/loss": val_loss,
+                "val/acc": val_m["accuracy"],
+                "val/balanced_acc": val_m["balanced_accuracy"],
+                "val/macro_f1": val_m["macro_f1"],
+                "val/weighted_f1": val_m["weighted_f1"],
+                "val/macro_precision": val_m["macro_precision"],
+                "val/macro_recall": val_m["macro_recall"],
             }
-            for row in val_m.get("per_class", []):
-                cn = row["class"]
-                log_dict[f"val/per_class_precision/{cn}"] = row["precision"]
-                log_dict[f"val/per_class_recall/{cn}"] = row["recall"]
+
             wandb.log(log_dict)
             scheduler.step(val_m["macro_f1"])
 
@@ -517,17 +570,9 @@ def run_train(args: argparse.Namespace) -> None:
                 best_val_snapshot["preds"],
                 best_val_snapshot["metrics"]["cm_labels"],
             )
-
-        if last_val_snapshot is not None:
-            wandb.run.summary["last_val_epoch"] = last_val_snapshot["epoch"]
-            wandb.run.summary["last_val_macro_f1"] = last_val_snapshot["metrics"]["macro_f1"]
-            wandb.run.summary["last_val_balanced_accuracy"] = last_val_snapshot["metrics"]["balanced_accuracy"]
-            wandb.run.summary["last_val_weighted_f1"] = last_val_snapshot["metrics"]["weighted_f1"]
-            _log_wandb_confusion_matrix(
-                "val/last_confusion_matrix",
-                last_val_snapshot["labels"],
-                last_val_snapshot["preds"],
-                last_val_snapshot["metrics"]["cm_labels"],
+            _log_wandb_per_class_table(
+                "val/best_per_class_metrics",
+                best_val_snapshot["metrics"]["per_class"],
             )
 
         wandb.finish()

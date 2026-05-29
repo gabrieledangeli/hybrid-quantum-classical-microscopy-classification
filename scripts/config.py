@@ -72,8 +72,6 @@ def parse_args() -> argparse.Namespace:
                     help="Sampler mode when imbalance_handling uses sampler.")
     ib.add_argument("--undersample_strength", type=float, default=0.7,
                     help="Maximum soft-undersampling strength [0, 1].")
-    ib.add_argument("--undersample_warmup_epochs", type=int, default=10,
-                    help="Epochs to ramp undersampling from 0 to max strength.")
 
     # -- Processing --------------------------------------------------------
     pr = parser.add_argument_group("Image processing")
@@ -180,7 +178,8 @@ def parse_args() -> argparse.Namespace:
     wb.add_argument("--wandb_entity", type=str, default=None,
                     help="W&B entity (user).")
     wb.add_argument("--run_name", type=str, default=None,
-                    help="Base W&B run name. A fold suffix is appended automatically.")
+                    help="Optional prefix for W&B and local run names. Timestamp "
+                         "and fold suffix are appended automatically.")
     wb.add_argument("--wandb_watch", action="store_true",
                     help="Enable wandb.watch() gradient tracking.")
 
