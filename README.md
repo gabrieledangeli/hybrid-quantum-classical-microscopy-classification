@@ -28,11 +28,11 @@ This project investigates whether **tensor-network (TN) bridges** and **variatio
 
 | Feature | Description |
 |---|---|
-| **Multiple classifiers** | ResNet-18/34/50 (pure) and Hybrid TN (ResNet -> MPS/PEPS -> VQC -> head) |
+| **Multiple classifiers** | ResNet-18/34/50 (pure) and Hybrid TN (ResNet -> MPS/PEPS/TTN -> VQC -> head) |
 | **RAW image processing** | Static (NumPy), parametrised (differentiable PyTorch), and neural-network (U-Net++) pipelines |
 | **Class-imbalance handling** | Weighted loss (Effective Number of Samples), weighted random sampling, soft undersampling with warm-up, conditional augmentation for rare classes |
 | **Cross-validation** | Stratified K-Fold and Stratified Shuffle-Split |
-| **Quantum simulation** | PennyLane with automatic backend selection (`lightning.gpu` -> `lightning.qubit` -> `default.qubit`) and classical MLP fallback |
+| **Quantum simulation** | PennyLane VQC with automatic backend selection (`lightning.gpu` -> `lightning.qubit` -> `default.qubit` backprop fallback) |
 | **Experiment tracking** | Weights & Biases integration (metrics, confusion matrices, per-class stats, gradient tracking) |
 
 ---
@@ -62,15 +62,15 @@ This project investigates whether **tensor-network (TN) bridges** and **variatio
               |  +--------+--------+    |
               |           |             |
               |  +--------v--------+    |
-              |  |   TN Bridge     |    |  (MPS or PEPS)
+              |  |   TN Bridge     |    |  (MPS / PEPS / TTN)
               |  +--------+--------+    |
               |           |             |
               |  +--------v--------+    |
-              |  |       VQC       |    |  (PennyLane or classical)
+              |  |       VQC       |    |  (PennyLane)
               |  +--------+--------+    |
               |           |             |
               |  +--------v--------+    |
-              |  |       MLP       |    |
+              |  |   BN + Linear   |    |
               |  +-----------------+    |
               +-------------------------+
                            |
@@ -87,7 +87,7 @@ HQCNNxLargeScaleMedicalImages/
 +-- LICENSE
 +-- requirements.txt
 +-- notebooks/
-|   +-- microscopy_dataset_analysis.ipynb
+|   +-- microscopy_rgb_qsvm_full.ipynb
 |   +-- MLL23_dataset_analysis.ipynb
 +-- scripts/
     +-- __init__.py
@@ -97,12 +97,11 @@ HQCNNxLargeScaleMedicalImages/
     |   +-- __init__.py
     |   +-- augmentation.py     # Augmentation pipelines & seeding
     |   +-- dataset.py          # Dataset classes (RAW & RGB)
-    |   +-- export_raw_scale100.py  # New acquisition -> synthetic raw_scale100 TIFF
     |   +-- utils.py            # I/O, CV splits, sampling helpers
     +-- models/
     |   +-- __init__.py
     |   +-- classifiers.py      # ResNet factory, EndToEndModel, TensorNormalize
-    |   +-- hybrid.py           # MPS/PEPS bridges, VQC, HybridTNClassifier
+    |   +-- hybrid.py           # MPS/PEPS/TTN bridges, VQC, HybridTNClassifier
     |   +-- losses.py           # Focal Loss
     +-- processing/
     |   +-- __init__.py
@@ -302,19 +301,19 @@ Run `python -m scripts.train --help` for the full list. Key groups:
 | **Cross-validation** | `--n_splits`, `--cv_strategy`, `--seed`, `--train_size` |
 | **Imbalance** | `--imbalance_handling`, `--sampler_mode`, `--undersample_strength` |
 | **Processing** | `--processing_mode`, `--sp_debayer`, `--sp_sharpening`, `--sp_denoising` |
-| **Augmentation** | `--augmentation`, `--conditional_augmentation`, `--rare_class_threshold` |
+| **Augmentation** | `--augmentation`, `--conditional_augmentation`, `--rare_class_threshold`, `--non_rare_aug_prob` |
 | **Training** | `--batch_size`, `--lr`, `--lr_head`, `--epochs`, `--loss_fn`, `--focal_gamma` |
 | **Classifier** | `--classifier_network`, `--classifier_pretrained`, `--freeze_resnet_backbone` |
-| **Hybrid TN** | `--n_qubits`, `--tn_bond_dim`, `--tn_phys_dim`, `--tn_hidden_dim`, `--tn_bridge`, `--vqc_layers` |
+| **Hybrid TN** | `--n_qubits`, `--ttn_leaves`, `--tn_bond_dim`, `--tn_phys_dim`, `--tn_hidden_dim`, `--tn_bridge`, `--vqc_layers`, `--backbone` |
 | **W&B** | `--wandb_project`, `--wandb_entity`, `--run_name`, `--wandb_watch` |
 
 ---
 
 ## Results & Logging
 
-- **Weights & Biases**: Each fold creates a separate W&B run with loss curves, accuracy, macro/weighted F1, balanced accuracy, per-class precision/recall, plus one `val/last_confusion_matrix` and one `val/best_confusion_matrix` instead of logging a new confusion matrix every validation step.
-- **Checkpoints**: When `--save_model` is enabled, the best model (by val macro-F1) is saved to `results/<dataset>/<processing_mode>/fold_<k>/best_model.pth`.
-- **Config snapshot**: A `state_dict.txt` file records the full CLI invocation and hyperparameters alongside each checkpoint.
+- **Weights & Biases**: Each fold is a separate W&B run. Per epoch it logs train/val loss, accuracy, macro/weighted F1, balanced accuracy, and macro precision/recall. At the best macro-F1 epoch it records summary metrics plus a single `val/best_confusion_matrix` plot and a `val/best_per_class_metrics` table (per-class precision/recall/F1), instead of logging a confusion matrix every validation step.
+- **Checkpoints**: When `--save_model` is enabled, the best model (by val macro-F1) is saved to `results/<dataset>/<processing_mode>/<run_name>/fold_<k>/best_model.pth`.
+- **Config snapshot**: A `run_config.txt` file recording the base run name, fold, and full resolved hyperparameters is written next to each checkpoint.
 - **Fine-tuning semantics**: `--freeze_resnet_backbone` keeps `layer4 + fc` trainable for plain ResNets. In `hybrid_tn`, the ResNet extractor has no FC head, so the same flag leaves only `layer4` trainable.
 
 ---

@@ -378,7 +378,7 @@ class MicroscopyDatasetRGB(MicroscopyDataset):
     and the per-channel normalisation statistics.
     """
 
-    _IMAGE_EXTENSIONS = (".tiff", ".tif", ".png")
+    _IMAGE_EXTENSIONS = (".tiff", ".tif")
     _IMAGE_DIR_PREFIX = "rgb_scale"
 
     camera_parameters = None  
