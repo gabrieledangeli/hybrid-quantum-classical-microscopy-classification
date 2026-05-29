@@ -15,8 +15,10 @@ import torch.nn.functional as F
 
 
 def set_global_seed(seed: int) -> None:
-    """Set seeds for ``torch``, ``numpy``, and ``random``."""
+    """Set seeds for ``torch`` (CPU + CUDA), ``numpy``, and ``random``."""
     torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
     np.random.seed(seed % (2**32))
     random.seed(seed)
 

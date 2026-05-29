@@ -238,13 +238,19 @@ python -m scripts.train \
 
 ### Hybrid TN + VQC (PEPS bridge)
 
+PEPS uses a fixed 4×4 (16-site) exact-contraction topology, so `--n_qubits` is
+pinned to 16 and `--tn_bond_dim` is clipped to 8 (the contraction memory grows
+as `bond_dim**8`). Out-of-range values are coerced automatically with a
+warning, but passing valid values directly is clearest:
+
 ```bash
 python -m scripts.train \
     --dataset Microscopy \
     --data_dir ./data \
     --classifier_network hybrid_tn \
     --tn_bridge peps \
-    --n_qubits 8 \
+    --n_qubits 16 \
+    --tn_bond_dim 8 \
     --epochs 30
 ```
 
