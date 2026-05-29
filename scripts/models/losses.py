@@ -1,4 +1,5 @@
-"""Focal Loss for imbalanced classification.
+"""
+Focal Loss for imbalanced classification.
 
 Reference: Lin *et al.*, "Focal Loss for Dense Object Detection", ICCV 2017.
 """
@@ -13,13 +14,18 @@ import torch.nn.functional as F
 
 
 class FocalLoss(nn.Module):
-    r"""Focal Loss: :math:`\text{FL}(p_t) = -\alpha_t (1-p_t)^\gamma \log p_t`.
+    r"""Focal Loss: FL(p_t) = -\alpha_t (1-p_t)^\gamma \log(p_t)`.
 
-    Compared with standard CE the :math:`(1-p_t)^\gamma` factor down-weights
+    Compared with standard CE the `(1-p_t)^\gamma` factor down-weights
     well-classified (easy) examples so the model can focus on hard negatives.
 
+    Note:
+        The canonical focal loss is obtained with ``label_smoothing=0.0``.
+        Using label smoothing is supported, but it changes the loss into a
+        smoothed-target extension and can weaken the focusing effect.
+
     Args:
-        weight: Per-class weight tensor (same semantics as ``nn.CrossEntropyLoss``).
+        weight: Per-class weight tensor .
         gamma: Focusing parameter (0 -> standard CE; 2 -> default).
         label_smoothing: Smoothing applied to the target distribution.
         reduction: ``'mean'`` | ``'sum'`` | ``'none'``.
@@ -63,7 +69,7 @@ class FocalLoss(nn.Module):
 
         if self.reduction == "mean":
             if self.weight is not None:
-                return loss.sum() / sample_w.sum().clamp(min=1e-8)  # type: ignore[possibly-undefined]
+                return loss.sum() / sample_w.sum().clamp(min=1e-8)
             return loss.mean()
         if self.reduction == "sum":
             return loss.sum()

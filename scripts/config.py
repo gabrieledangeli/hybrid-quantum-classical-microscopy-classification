@@ -113,17 +113,16 @@ def parse_args() -> argparse.Namespace:
                     help="Learning rate for randomly-initialised head layers.")
     tr.add_argument("--weight_decay", type=float, default=1e-4,
                     help="AdamW weight decay.")
-    tr.add_argument("--label_smoothing", type=float, default=0.1,
-                    help="Label smoothing factor for CE loss (0 = off).")
-    tr.add_argument("--loss_fn", type=str, default="cross_entropy",
+    tr.add_argument("--label_smoothing", type=float, default=0.0,
+                    help="Label smoothing factor (0 = off). For focal loss, "
+                         "0.0 is recommended unless intentionally testing "
+                         "smoothed focal loss.")
+    tr.add_argument("--loss_fn", type=str, default="focal",
                     choices=["cross_entropy", "focal"],
                     help="Loss function.")
     tr.add_argument("--focal_gamma", type=float, default=2.0,
                     help="Focusing parameter gamma for Focal Loss.")
     tr.add_argument("--epochs", type=int, default=50)
-    tr.add_argument("--lr_warmup_epochs", type=int, default=0,
-                    help="Linear LR warmup epochs (0 = off).")
-    tr.add_argument("--check_val_every_n_epoch", type=int, default=1)
     tr.add_argument("--save_model", action="store_true",
                     help="Save the best model checkpoint.")
 

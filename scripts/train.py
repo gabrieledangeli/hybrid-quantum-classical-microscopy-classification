@@ -188,7 +188,7 @@ def _build_classifier(args, n_classes: int):
 
 
 def _build_criterion(args, class_counts: Counter, n_classes: int, device: torch.device):
-    """Return ``(criterion, weight_tensor_or_none)``."""
+    """Return the training criterion, optionally with class weights."""
     use_weighted = args.imbalance_handling in ("loss", "both")
     weight = None
 
@@ -244,16 +244,17 @@ def _build_optimizer(args, model: nn.Module):
 
 
 def _build_scheduler(args, optimizer):
-    """Cosine annealing, optionally preceded by linear warmup."""
-    cosine = optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=max(1, args.epochs - args.lr_warmup_epochs), eta_min=1e-6
+    """Reduce LR when validation macro F1 stops improving."""
+    min_lrs = [group["lr"] * 0.01 for group in optimizer.param_groups]
+    return optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer,
+        mode="max",
+        factor=0.5,
+        patience=5,
+        threshold=1e-4,
+        threshold_mode="rel",
+        min_lr=min_lrs,
     )
-    if args.lr_warmup_epochs > 0:
-        warmup = optim.lr_scheduler.LinearLR(
-            optimizer, start_factor=0.01, end_factor=1.0, total_iters=args.lr_warmup_epochs
-        )
-        return optim.lr_scheduler.SequentialLR(optimizer, [warmup, cosine], milestones=[args.lr_warmup_epochs])
-    return cosine
 
 
 def _make_wandb_run_name(args: argparse.Namespace, fold: int) -> str:
@@ -424,8 +425,8 @@ def run_train(args: argparse.Namespace) -> None:
                 sampler = dyn_sampler
             else:
                 sw = torch.DoubleTensor([
-                    (1.0 / class_counts[l]) if class_counts[l] > 0 else 0.0
-                    for l in train_labels
+                    (1.0 / class_counts[train_label]) if class_counts[train_label] > 0 else 0.0
+                    for train_label in train_labels
                 ])
                 sampler = WeightedRandomSampler(sw, len(train_idx), replacement=True)
 
@@ -467,44 +468,43 @@ def run_train(args: argparse.Namespace) -> None:
                 dyn_sampler.weights = sw
 
             train_loss, train_m = train_one_epoch(model, train_loader, criterion, optimizer, DEVICE, display_class_names)
-            scheduler.step()
 
-            if epoch % args.check_val_every_n_epoch == 0:
-                val_loss, val_m, val_labels, val_preds = validate(
-                    model, val_loader, criterion, DEVICE, display_class_names
-                )
-                last_val_snapshot = {
+            val_loss, val_m, val_labels, val_preds = validate(
+                model, val_loader, criterion, DEVICE, display_class_names
+            )
+            last_val_snapshot = {
+                "epoch": epoch,
+                "metrics": val_m,
+                "labels": val_labels.copy(),
+                "preds": val_preds.copy(),
+            }
+
+            pbar.set_postfix(loss=f"{val_loss:.4f}", mF1=f"{val_m['macro_f1']:.4f}", bAcc=f"{val_m['balanced_accuracy']:.4f}")
+
+            log_dict = {
+                "train/loss": train_loss, "train/acc": train_m["accuracy"], "train/macro_f1": train_m["macro_f1"],
+                "val/loss": val_loss, "val/acc": val_m["accuracy"], "val/balanced_acc": val_m["balanced_accuracy"],
+                "val/macro_f1": val_m["macro_f1"], "val/weighted_f1": val_m["weighted_f1"],
+                "val/macro_precision": val_m["macro_precision"], "val/macro_recall": val_m["macro_recall"],
+            }
+            for row in val_m.get("per_class", []):
+                cn = row["class"]
+                log_dict[f"val/per_class_precision/{cn}"] = row["precision"]
+                log_dict[f"val/per_class_recall/{cn}"] = row["recall"]
+            wandb.log(log_dict)
+            scheduler.step(val_m["macro_f1"])
+
+            if val_m["macro_f1"] > best_f1:
+                best_f1 = val_m["macro_f1"]
+                best_epoch = epoch
+                best_val_snapshot = {
                     "epoch": epoch,
                     "metrics": val_m,
                     "labels": val_labels.copy(),
                     "preds": val_preds.copy(),
                 }
-
-                pbar.set_postfix(loss=f"{val_loss:.4f}", mF1=f"{val_m['macro_f1']:.4f}", bAcc=f"{val_m['balanced_accuracy']:.4f}")
-
-                log_dict = {
-                    "train/loss": train_loss, "train/acc": train_m["accuracy"], "train/macro_f1": train_m["macro_f1"],
-                    "val/loss": val_loss, "val/acc": val_m["accuracy"], "val/balanced_acc": val_m["balanced_accuracy"],
-                    "val/macro_f1": val_m["macro_f1"], "val/weighted_f1": val_m["weighted_f1"],
-                    "val/macro_precision": val_m["macro_precision"], "val/macro_recall": val_m["macro_recall"],
-                }
-                for row in val_m.get("per_class", []):
-                    cn = row["class"]
-                    log_dict[f"val/per_class_precision/{cn}"] = row["precision"]
-                    log_dict[f"val/per_class_recall/{cn}"] = row["recall"]
-                wandb.log(log_dict)
-
-                if val_m["macro_f1"] > best_f1:
-                    best_f1 = val_m["macro_f1"]
-                    best_epoch = epoch
-                    best_val_snapshot = {
-                        "epoch": epoch,
-                        "metrics": val_m,
-                        "labels": val_labels.copy(),
-                        "preds": val_preds.copy(),
-                    }
-                    if args.save_model:
-                        torch.save(model.state_dict(), os.path.join(run_dir, "best_model.pth"))
+                if args.save_model:
+                    torch.save(model.state_dict(), os.path.join(run_dir, "best_model.pth"))
 
         if best_val_snapshot is not None:
             wandb.run.summary["best_epoch"] = best_epoch
