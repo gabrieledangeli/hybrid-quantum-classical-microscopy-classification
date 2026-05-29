@@ -72,9 +72,11 @@ def resnet_model(
 class EndToEndModel(nn.Module):
     """Pipeline wrapper: *processor -> augmentation -> normalisation -> classifier*.
 
-    When *conditional augmentation* is enabled only samples whose labels belong
-    to ``augmentation_target_classes`` are augmented with probability 1, while
-    non-target samples are augmented with ``non_target_augmentation_prob``.
+    When *conditional augmentation* is enabled, samples whose labels belong to
+    ``augmentation_target_classes`` are eligible for the augmentation pipeline,
+    while non-target samples are eligible with ``non_target_augmentation_prob``.
+    Each transform inside the augmentation module still uses its own sampling
+    probability.
     """
 
     def __init__(
@@ -85,7 +87,6 @@ class EndToEndModel(nn.Module):
         augmentation: Optional[nn.Module] = None,
         augmentation_target_classes: Optional[List[int]] = None,
         non_target_augmentation_prob: float = 1.0,
-        augmentation_on_eval: bool = False,
         freeze_processor: bool = False,
     ) -> None:
         super().__init__()
@@ -97,7 +98,6 @@ class EndToEndModel(nn.Module):
             set(augmentation_target_classes) if augmentation_target_classes is not None else None
         )
         self.non_target_augmentation_prob = float(non_target_augmentation_prob)
-        self.augmentation_on_eval = augmentation_on_eval
         self.freeze_processor = freeze_processor
 
         if freeze_processor and self.processor is not None:
@@ -109,7 +109,7 @@ class EndToEndModel(nn.Module):
         if self.processor is not None:
             x = self.processor(x)
 
-        if self.augmentation is not None and (self.training or self.augmentation_on_eval):
+        if self.augmentation is not None and self.training:
             x = self._apply_augmentation(x, labels)
 
         if self.normalization is not None:

@@ -193,7 +193,7 @@ class MPSBridge(nn.Module):
         left = self._left_envs(amps, cores)
         right = self._right_envs(amps, cores)
         obs_amps = self._observable_amps(amps)
-        z_mps = self._expectations(amps, left, right, cores, obs_amps)
+        z_mps = torch.tanh(self._expectations(amps, left, right, cores, obs_amps))
         z_skip = torch.tanh(self.skip_proj(x)) * self.site_scale
         alpha = torch.sigmoid(self.mix_logit)
         return alpha * z_mps + (1 - alpha) * z_skip + self.bias
@@ -436,61 +436,71 @@ class _TTNCore(nn.Module):
 
 
 class TTNBridge(nn.Module):
-    """Hierarchical binary-tree TTN bridge with a fixed 16-leaf layout.
+    """Hierarchical binary-tree TTN bridge with a configurable leaf layout.
 
     The bridge mirrors the diagrammed TTN:
-    1. split features into 16 leaves;
-    2. encode each leaf into a local physical state;
+    1. split features into ``n_leaves`` leaves;
+    2. encode each leaf into a latent state of dimension ``bond_dim``;
     3. contract adjacent pairs bottom-up through TTN cores;
-    4. stop when ``n_sites`` final states remain and measure each state.
+    4. stop when ``n_sites`` physical states remain and measure each state.
     """
 
-    N_LEAVES = 16
+    DEFAULT_LEAVES = 64
+    VALID_LEAVES = (16, 32, 64, 128)
     VALID_OUTPUTS = (4, 8)
 
     def __init__(
         self,
         feature_dim: int = 512,
         n_sites: int = 8,
-        bond_dim: int = 32,
+        bond_dim: int = 64,
         phys_dim: int = 2,
         hidden_dim: int = 128,
+        n_leaves: int = DEFAULT_LEAVES,
         temperature: float = 1.0,
         eps: float = 1e-8,
     ) -> None:
         super().__init__()
-        if feature_dim % self.N_LEAVES:
-            raise ValueError(f"feature_dim must be divisible by {self.N_LEAVES} TTN leaves.")
+        if n_leaves not in self.VALID_LEAVES:
+            raise ValueError(f"n_leaves must be one of {self.VALID_LEAVES}, got {n_leaves}.")
+        if feature_dim % n_leaves:
+            raise ValueError(f"feature_dim must be divisible by {n_leaves} TTN leaves.")
         if bond_dim < 1:
             raise ValueError(f"bond_dim must be >= 1, got {bond_dim}.")
         if n_sites not in self.VALID_OUTPUTS:
             raise ValueError(
-                f"TTN uses a fixed {self.N_LEAVES}-leaf tree; n_sites must be one of {self.VALID_OUTPUTS}, got {n_sites}."
+                f"TTN final states must be one of {self.VALID_OUTPUTS}, got n_sites={n_sites}."
+            )
+        if n_leaves <= n_sites:
+            raise ValueError(
+                f"n_leaves must be greater than n_sites, got n_leaves={n_leaves}, n_sites={n_sites}."
             )
 
         self.Q = n_sites
         self.D = bond_dim
         self.P = phys_dim
+        self.n_leaves = n_leaves
         self.hidden_dim = hidden_dim
         self.temperature = temperature
         self.eps = eps
-        self.Fpl = feature_dim // self.N_LEAVES
+        self.Fpl = feature_dim // self.n_leaves
 
-        self.ln = nn.ModuleList([nn.LayerNorm(self.Fpl) for _ in range(self.N_LEAVES)])
-        self.fc1 = nn.ModuleList([nn.Linear(self.Fpl, hidden_dim) for _ in range(self.N_LEAVES)])
-        self.fc_logits = nn.ModuleList([nn.Linear(hidden_dim, self.P) for _ in range(self.N_LEAVES)])
-        self.fc_gate = nn.ModuleList([nn.Linear(hidden_dim, 1) for _ in range(self.N_LEAVES)])
+        self.ln = nn.ModuleList([nn.LayerNorm(self.Fpl) for _ in range(self.n_leaves)])
+        self.fc1 = nn.ModuleList([nn.Linear(self.Fpl, hidden_dim) for _ in range(self.n_leaves)])
+        self.fc_logits = nn.ModuleList([nn.Linear(hidden_dim, self.D) for _ in range(self.n_leaves)])
+        self.fc_gate = nn.ModuleList([nn.Linear(hidden_dim, 1) for _ in range(self.n_leaves)])
 
         levels = []
-        child_dim = self.P
-        n_children = self.N_LEAVES
+        child_dim = self.D
+        n_children = self.n_leaves
         while n_children > self.Q:
             n_parents = n_children // 2
+            parent_dim = self.P if n_parents == self.Q else self.D
             levels.append(nn.ModuleList([
-                _TTNCore(child_dim, child_dim, self.D, eps) for _ in range(n_parents)
+                _TTNCore(child_dim, child_dim, parent_dim, eps) for _ in range(n_parents)
             ]))
             n_children = n_parents
-            child_dim = self.D
+            child_dim = parent_dim
         self.levels = nn.ModuleList(levels)
 
         self.beta_logit = nn.Parameter(torch.zeros(self.Q))
@@ -499,7 +509,7 @@ class TTNBridge(nn.Module):
         self.mix_logit = nn.Parameter(torch.zeros(()))
         self.bias = nn.Parameter(torch.zeros(self.Q))
 
-        Z, X = _generalized_ZX(self.D)
+        Z, X = _generalized_ZX(self.P)
         self.register_buffer("ObsZ", Z)
         self.register_buffer("ObsX", X)
 
@@ -507,14 +517,14 @@ class TTNBridge(nn.Module):
 
     def _encode(self, x: torch.Tensor) -> torch.Tensor:
         B = x.shape[0]
-        chunks = x.view(B, self.N_LEAVES, self.Fpl)
+        chunks = x.view(B, self.n_leaves, self.Fpl)
         leaves = []
-        for i in range(self.N_LEAVES):
+        for i in range(self.n_leaves):
             h = F.gelu(self.fc1[i](self.ln[i](chunks[:, i])))
             logits = self.fc_logits[i](h) / self.temperature
             amp = torch.sqrt(F.softmax(logits, dim=-1).clamp(min=self.eps))
             gate = torch.sigmoid(self.fc_gate[i](h))
-            uniform = torch.full_like(amp, 1.0 / math.sqrt(self.P))
+            uniform = torch.full_like(amp, 1.0 / math.sqrt(self.D))
             leaves.append(_l2_normalize(gate * amp + (1.0 - gate) * uniform, eps=self.eps))
         return torch.stack(leaves, 1)
 
@@ -546,7 +556,7 @@ class TTNBridge(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         leaves = self._encode(x)
         final_states = self._bottom_up(leaves)
-        z_ttn = self._measure(final_states)
+        z_ttn = torch.tanh(self._measure(final_states))
         z_skip = torch.tanh(self.skip_proj(x)) * self.site_scale
         alpha = torch.sigmoid(self.mix_logit)
         return alpha * z_ttn + (1.0 - alpha) * z_skip + self.bias
@@ -714,6 +724,7 @@ class HybridTNClassifier(nn.Module):
         backbone: str = "resnet18",
         backbone_weights: Optional[str] = None,
         pretrained: bool = True,
+        ttn_leaves: int = TTNBridge.DEFAULT_LEAVES,
     ) -> None:
         super().__init__()
         bridge_type = bridge_type.lower().strip()
@@ -724,8 +735,18 @@ class HybridTNClassifier(nn.Module):
             )
         if bridge_type == "ttn" and n_qubits not in TTNBridge.VALID_OUTPUTS:
             raise ValueError(
-                f"TTN uses a fixed {TTNBridge.N_LEAVES}-leaf tree; "
-                f"expected n_qubits in {TTNBridge.VALID_OUTPUTS}, got {n_qubits}."
+                f"TTN final states must be one of {TTNBridge.VALID_OUTPUTS}; "
+                f"got n_qubits={n_qubits}."
+            )
+        if bridge_type == "ttn" and ttn_leaves not in TTNBridge.VALID_LEAVES:
+            raise ValueError(
+                f"TTN leaves must be one of {TTNBridge.VALID_LEAVES}; "
+                f"got ttn_leaves={ttn_leaves}."
+            )
+        if bridge_type == "ttn" and ttn_leaves <= n_qubits:
+            raise ValueError(
+                f"TTN leaves must be greater than final states; "
+                f"got ttn_leaves={ttn_leaves}, n_qubits={n_qubits}."
             )
 
         self.n_classes = n_classes
@@ -761,12 +782,14 @@ class HybridTNClassifier(nn.Module):
                                         bridge_hidden_dim
                                     )
         elif bridge_type == "ttn":
-            self.tn_bridge = TTNBridge(feat_dim, 
-                                       n_qubits, 
-                                       tn_bond_dim, 
-                                       tn_phys_dim, 
-                                       bridge_hidden_dim
-                                    )
+            self.tn_bridge = TTNBridge(
+                feat_dim,
+                n_qubits,
+                tn_bond_dim,
+                tn_phys_dim,
+                bridge_hidden_dim,
+                n_leaves=ttn_leaves,
+            )
         else:
             raise ValueError(f"Unknown bridge_type '{bridge_type}'.")
 
@@ -798,6 +821,7 @@ def hybrid_tn_model(
     backbone: str = "resnet18",
     backbone_weights: Optional[str] = None,
     pretrained: bool = True,
+    ttn_leaves: int = TTNBridge.DEFAULT_LEAVES,
 ) -> HybridTNClassifier:
     """Factory for `HybridTNClassifier`."""
     return HybridTNClassifier(
@@ -812,4 +836,5 @@ def hybrid_tn_model(
         backbone=backbone,
         backbone_weights=backbone_weights,
         pretrained=pretrained,
+        ttn_leaves=ttn_leaves,
     )

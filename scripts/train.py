@@ -168,6 +168,7 @@ def _build_classifier(args, n_classes: int):
             tn_bond_dim=args.tn_bond_dim,
             tn_phys_dim=args.tn_phys_dim,
             tn_hidden_dim=args.tn_hidden_dim,
+            ttn_leaves=args.ttn_leaves,
             tn_bridge=args.tn_bridge,
             vqc_layers=args.vqc_layers,
             freeze_resnet=args.freeze_resnet_backbone,
@@ -394,8 +395,10 @@ def run_train(args: argparse.Namespace) -> None:
             non_target_prob = args.non_rare_aug_prob
 
         model = EndToEndModel(
-            classifier=classifier, processor=processor,
-            normalization=normalization, augmentation=augmentation,
+            classifier=classifier, 
+            processor=processor,
+            normalization=normalization, 
+            augmentation=augmentation,
             augmentation_target_classes=aug_targets,
             non_target_augmentation_prob=non_target_prob,
             freeze_processor=args.freeze_processor,

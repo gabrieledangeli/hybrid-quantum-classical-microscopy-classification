@@ -148,7 +148,11 @@ def parse_args() -> argparse.Namespace:
     # -- Hybrid TN + VQC --------------------------------------------------
     hy = parser.add_argument_group("Hybrid TN + VQC")
     hy.add_argument("--n_qubits", type=int, default=8,
-                    help="Number of TN sites/qubits. PEPS uses 16 fixed sites; TTN uses 16 leaves and 4/8 final states.")
+                    help="Number of TN sites/qubits. PEPS uses 16 fixed sites; "
+                         "TTN uses this as the number of final states.")
+    hy.add_argument("--ttn_leaves", type=int, default=64,
+                    choices=[16, 32, 64, 128],
+                    help="Number of input leaves for TTN.")
     hy.add_argument("--tn_bond_dim", type=int, default=64,
                     help="Internal TN bond dimension. For exact PEPS this is clipped to 8.")
     hy.add_argument("--tn_phys_dim", type=int, default=2,
@@ -157,7 +161,8 @@ def parse_args() -> argparse.Namespace:
                     help="Hidden dimension of the per-site encoder MLP feeding the TN.")
     hy.add_argument("--tn_bridge", type=str, default="mps",
                     choices=["mps", "peps", "ttn"],
-                    help="Tensor-network bridge type. PEPS uses a fixed exact 4x4 topology; TTN uses a fixed 16-leaf binary tree.")
+                    help="Tensor-network bridge type. PEPS uses a fixed exact 4x4 topology; "
+                         "TTN uses --ttn_leaves leaves.")
     hy.add_argument("--vqc_layers", type=int, default=2,
                     help="Parametrised VQC layers.")
 
