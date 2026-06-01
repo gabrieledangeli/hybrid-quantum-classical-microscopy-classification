@@ -161,7 +161,12 @@ def parse_args() -> argparse.Namespace:
                     help="Tensor-network bridge type. PEPS uses a fixed exact 4x4 topology; "
                          "TTN uses --ttn_leaves leaves.")
     hy.add_argument("--vqc_layers", type=int, default=2,
-                    help="Parametrised VQC layers.")
+                    help="Parametrised VQC layers (also the number of data re-uploads).")
+    hy.add_argument("--vqc_readout", type=str, default="z+zz",
+                    choices=["z", "z+zz", "bloch", "full"],
+                    help="VQC read-out observables: 'z' single-qubit <Z>; 'z+zz' adds "
+                         "nearest-neighbour <ZZ> ring correlators (default); 'bloch' the "
+                         "full (<X>,<Y>,<Z>) vector; 'full' adds {XX,YY,ZZ} ring correlators.")
 
     # -- Adversarial -------------------------------------------------------
     parser.add_argument("--adv_parameters",

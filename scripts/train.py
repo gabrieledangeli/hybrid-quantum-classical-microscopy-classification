@@ -171,6 +171,7 @@ def _build_classifier(args, n_classes: int):
             ttn_leaves=args.ttn_leaves,
             tn_bridge=args.tn_bridge,
             vqc_layers=args.vqc_layers,
+            vqc_readout=args.vqc_readout,
             freeze_resnet=args.freeze_resnet_backbone,
             backbone=args.backbone,
             backbone_weights=args.backbone_weights,

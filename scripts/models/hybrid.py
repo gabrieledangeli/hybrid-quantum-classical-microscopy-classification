@@ -562,15 +562,62 @@ class TTNBridge(nn.Module):
         return alpha * z_ttn + (1.0 - alpha) * z_skip + self.bias
 
 
-# -- PennyLane quantum layer ------------------------------------------------
+# -- Variational quantum layer ----------------------------------------------
 
-class PennyLaneQuantumLayer(nn.Module):
-    """Variational quantum circuit: RX(inputs) -> [RX/RY/RZ + ring CNOT]xL -> <Z>."""
+class VariationalQuantumLayer(nn.Module):
+    """Variational quantum circuit with data re-uploading and configurable read-out.
 
-    def __init__(self, n_qubits: int, n_layers: int) -> None:
+    Each of the ``n_layers`` blocks: (1) re-uploads the inputs via
+    ``RX(freq * inputs)`` with trainable per-(layer, qubit) ``freqs`` -- which
+    widen the model's accessible Fourier spectrum -- then (2) applies the
+    ``RX/RY/RZ`` variational rotations and (3) a ring of CNOTs.
+
+    The read-out is selected by ``readout``:
+
+    * ``"z"``     single-qubit ``<Z_i>`` only (width ``n_qubits``).
+    * ``"z+zz"``  ``<Z_i>`` plus nearest-neighbour ``<Z_i Z_j>`` correlators on
+      the entangling ring (default; exposes entanglement to the head).
+    * ``"bloch"`` the full local Bloch vector ``(<X_i>, <Y_i>, <Z_i>)``.
+    * ``"full"``  Bloch vector plus ``{XX, YY, ZZ}`` ring correlators.
+
+    Single-qubit X/Y are partly redundant with the trainable final rotations;
+    the ring XX/YY correlators are not, so they probe independent entanglement
+    channels -- at the cost of a wider (and, under adjoint, proportionally more
+    expensive) read-out. The flat output width is ``readout_dim``.
+    """
+
+    VALID_READOUTS = ("z", "z+zz", "bloch", "full")
+
+    def __init__(self, n_qubits: int, n_layers: int, readout: str = "z+zz") -> None:
         super().__init__()
+        readout = readout.lower().strip()
+        if readout not in self.VALID_READOUTS:
+            raise ValueError(f"readout must be one of {self.VALID_READOUTS}, got '{readout}'.")
         self.n_qubits = n_qubits
         self.n_layers = n_layers
+        self.readout = readout
+
+        # Nearest-neighbour pairs mirror the entangling ring built below.
+        pairs = []
+        if n_qubits > 1:
+            pairs = [(i, i + 1) for i in range(n_qubits - 1)]
+            if n_qubits > 2:
+                pairs.append((n_qubits - 1, 0))
+
+        # Read-out observables: each term is a tuple of (Pauli, wire) factors.
+        # Single-qubit terms first, then correlators, so ``"z+zz"`` keeps its
+        # original [<Z_i>..., <Z_iZ_j>...] ordering.
+        single_bases = {"z": "Z", "z+zz": "Z", "bloch": "XYZ", "full": "XYZ"}[readout]
+        corr_bases = {"z": "", "z+zz": "Z", "bloch": "", "full": "XYZ"}[readout]
+        spec = []
+        for p in single_bases:
+            spec += [((p, i),) for i in range(n_qubits)]
+        for p in corr_bases:
+            spec += [((p, a), (p, b)) for a, b in pairs]
+
+        self.corr_pairs = pairs if corr_bases else []
+        self.readout_spec = spec
+        self.readout_dim = len(spec)
 
         try:
             import pennylane as qml
@@ -593,23 +640,43 @@ class PennyLaneQuantumLayer(nn.Module):
             diff = "backprop"
             print("[Quantum] Falling back to default.qubit (backprop).")
 
+        pauli = {"X": qml.PauliX, "Y": qml.PauliY, "Z": qml.PauliZ}
+
+        def _observable(term):
+            (p0, w0), rest = term[0], term[1:]
+            op = pauli[p0](w0)
+            for p, w in rest:
+                op = op @ pauli[p](w)
+            return op
+
         @qml.qnode(dev, interface="torch", diff_method=diff)
-        def circuit(inputs, weights):
-            for i in range(n_qubits):
-                qml.RX(inputs[..., i], wires=i)
+        def circuit(inputs, weights, freqs):
             for layer in range(n_layers):
+                # Data re-uploading with trainable frequencies.
+                for i in range(n_qubits):
+                    qml.RX(freqs[layer, i] * inputs[..., i], wires=i)
+                # Variational rotations.
                 for i in range(n_qubits):
                     qml.RX(weights[layer, i, 0], wires=i)
                     qml.RY(weights[layer, i, 1], wires=i)
                     qml.RZ(weights[layer, i, 2], wires=i)
+                # Ring entanglement.
                 if n_qubits > 1:
                     for i in range(n_qubits - 1):
                         qml.CNOT(wires=[i, i + 1])
                     if n_qubits > 2:
                         qml.CNOT(wires=[n_qubits - 1, 0])
-            return [qml.expval(qml.PauliZ(i)) for i in range(n_qubits)]
+            return [qml.expval(_observable(t)) for t in spec]
 
-        self.qlayer = qml.qnn.TorchLayer(circuit, {"weights": (n_layers, n_qubits, 3)})
+        weight_shapes = {
+            "weights": (n_layers, n_qubits, 3),
+            "freqs": (n_layers, n_qubits),
+        }
+        self.qlayer = qml.qnn.TorchLayer(circuit, weight_shapes)
+        # Start re-uploading at unit frequency so the initial encoding scale
+        # matches the (separately learnable) ``angle_scale`` in the classifier.
+        with torch.no_grad():
+            self.qlayer.freqs.fill_(1.0)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.qlayer(x)
@@ -719,6 +786,7 @@ class HybridTNClassifier(nn.Module):
         tn_phys_dim: int = 2,
         bridge_hidden_dim: int = 128,
         vqc_layers: int = 2,
+        vqc_readout: str = "z+zz",
         freeze_resnet: bool = False,
         bridge_type: str = "mps",
         backbone: str = "resnet18",
@@ -793,10 +861,13 @@ class HybridTNClassifier(nn.Module):
         else:
             raise ValueError(f"Unknown bridge_type '{bridge_type}'.")
 
-        self.quantum = PennyLaneQuantumLayer(n_qubits, vqc_layers)
+        self.quantum = VariationalQuantumLayer(n_qubits, vqc_layers, readout=vqc_readout)
 
-        self.q_norm = nn.BatchNorm1d(n_qubits)
-        self.q_proj = nn.Linear(n_qubits, n_classes)
+        # The VQC read-out width depends on ``vqc_readout`` (single-qubit and/or
+        # correlator observables); size the head to match.
+        readout_dim = self.quantum.readout_dim
+        self.q_norm = nn.BatchNorm1d(readout_dim)
+        self.q_proj = nn.Linear(readout_dim, n_classes)
         self.angle_scale = nn.Parameter(torch.tensor(0.75 * math.pi))
 
     def forward(self, images: torch.Tensor) -> torch.Tensor:
@@ -816,6 +887,7 @@ def hybrid_tn_model(
     tn_phys_dim: int = 2,
     tn_hidden_dim: int = 128,
     vqc_layers: int = 2,
+    vqc_readout: str = "z+zz",
     freeze_resnet: bool = False,
     tn_bridge: str = "mps",
     backbone: str = "resnet18",
@@ -831,6 +903,7 @@ def hybrid_tn_model(
         tn_phys_dim=tn_phys_dim,
         bridge_hidden_dim=tn_hidden_dim,
         vqc_layers=vqc_layers,
+        vqc_readout=vqc_readout,
         freeze_resnet=freeze_resnet,
         bridge_type=tn_bridge,
         backbone=backbone,

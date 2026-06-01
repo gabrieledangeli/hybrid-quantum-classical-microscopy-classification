@@ -32,7 +32,7 @@ This project investigates whether **tensor-network (TN) bridges** and **variatio
 | **RAW image processing** | Static (NumPy), parametrised (differentiable PyTorch), and neural-network (U-Net++) pipelines |
 | **Class-imbalance handling** | Weighted loss (Effective Number of Samples), weighted random sampling, soft undersampling with warm-up, conditional augmentation for rare classes |
 | **Cross-validation** | Stratified K-Fold and Stratified Shuffle-Split |
-| **Quantum simulation** | PennyLane VQC with automatic backend selection (`lightning.gpu` -> `lightning.qubit` -> `default.qubit` backprop fallback) |
+| **Quantum simulation** | PennyLane VQC with data re-uploading, trainable encoding frequencies, and a configurable read-out (`--vqc_readout`: single-qubit `<Z>`, `<ZZ>` ring correlators, full Bloch vector, or `XX/YY/ZZ` correlators); automatic backend selection (`lightning.gpu` -> `lightning.qubit` -> `default.qubit` backprop fallback) |
 | **Experiment tracking** | Weights & Biases integration (metrics, confusion matrices, per-class stats, gradient tracking) |
 
 ---
@@ -66,7 +66,7 @@ This project investigates whether **tensor-network (TN) bridges** and **variatio
               |  +--------+--------+    |
               |           |             |
               |  +--------v--------+    |
-              |  |       VQC       |    |  (PennyLane)
+              |  |       VQC       |    |  (re-uploading VQC, PennyLane)
               |  +--------+--------+    |
               |           |             |
               |  +--------v--------+    |
@@ -231,6 +231,7 @@ python -m scripts.train \
     --tn_bridge mps \
     --n_qubits 8 \
     --vqc_layers 2 \
+    --vqc_readout z+zz \
     --freeze_resnet_backbone \
     --epochs 30
 ```
@@ -304,7 +305,7 @@ Run `python -m scripts.train --help` for the full list. Key groups:
 | **Augmentation** | `--augmentation`, `--conditional_augmentation`, `--rare_class_threshold`, `--non_rare_aug_prob` |
 | **Training** | `--batch_size`, `--lr`, `--lr_head`, `--epochs`, `--loss_fn`, `--focal_gamma` |
 | **Classifier** | `--classifier_network`, `--classifier_pretrained`, `--freeze_resnet_backbone` |
-| **Hybrid TN** | `--n_qubits`, `--ttn_leaves`, `--tn_bond_dim`, `--tn_phys_dim`, `--tn_hidden_dim`, `--tn_bridge`, `--vqc_layers`, `--backbone` |
+| **Hybrid TN** | `--n_qubits`, `--ttn_leaves`, `--tn_bond_dim`, `--tn_phys_dim`, `--tn_hidden_dim`, `--tn_bridge`, `--vqc_layers`, `--vqc_readout`, `--backbone` |
 | **W&B** | `--wandb_project`, `--wandb_entity`, `--run_name`, `--wandb_watch` |
 
 ---
