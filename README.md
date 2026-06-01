@@ -312,7 +312,7 @@ Run `python -m scripts.train --help` for the full list. Key groups:
 
 ## Results & Logging
 
-- **Weights & Biases**: Each fold is a separate W&B run. Per epoch it logs train/val loss, accuracy, macro/weighted F1, balanced accuracy, and macro precision/recall. At the best macro-F1 epoch it records summary metrics plus a single `val/best_confusion_matrix` plot and a `val/best_per_class_metrics` table (per-class precision/recall/F1), instead of logging a confusion matrix every validation step.
+- **Weights & Biases**: Each fold is a separate W&B run. Per epoch it logs train/val loss, accuracy, macro/weighted F1, balanced accuracy, and macro precision/recall. At the best macro-F1 epoch it records summary metrics plus a single `val/best_confusion_matrix` plot and a `val/best_per_class_metrics` table (per-class precision/recall/F1), instead of logging a confusion matrix every validation step. After all folds complete, it creates a grouped `*_cv_summary` run with a per-fold table and mean/std validation metrics across folds.
 - **Checkpoints**: When `--save_model` is enabled, the best model (by val macro-F1) is saved to `results/<dataset>/<processing_mode>/<run_name>/fold_<k>/best_model.pth`.
 - **Config snapshot**: A `run_config.txt` file recording the base run name, fold, and full resolved hyperparameters is written next to each checkpoint.
 - **Fine-tuning semantics**: `--freeze_resnet_backbone` keeps `layer4 + fc` trainable for plain ResNets. In `hybrid_tn`, the ResNet extractor has no FC head, so the same flag leaves only `layer4` trainable.

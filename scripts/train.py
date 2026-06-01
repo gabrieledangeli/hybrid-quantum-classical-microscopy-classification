@@ -340,6 +340,98 @@ def _log_wandb_per_class_table(key: str, per_class: List[Dict[str, Any]]) -> Non
         print(f"[Warning] W&B per-class table log failed for '{key}': {exc}")
 
 
+def _make_fold_summary(best_val_snapshot: Dict[str, Any]) -> Dict[str, Any]:
+    """Extract the best validation metrics that should be aggregated across folds."""
+    metrics = best_val_snapshot["metrics"]
+    return {
+        "fold": best_val_snapshot["fold"],
+        "best_epoch": best_val_snapshot["epoch"],
+        "val_loss": best_val_snapshot["loss"],
+        "val_accuracy": metrics["accuracy"],
+        "val_balanced_accuracy": metrics["balanced_accuracy"],
+        "val_macro_f1": metrics["macro_f1"],
+        "val_weighted_f1": metrics["weighted_f1"],
+        "val_macro_precision": metrics["macro_precision"],
+        "val_macro_recall": metrics["macro_recall"],
+    }
+
+
+def _log_wandb_cv_summary(
+    args: argparse.Namespace,
+    base_run_name: str,
+    fold_summaries: List[Dict[str, Any]],
+) -> None:
+    """Log a cross-validation summary run with per-fold metrics and mean/std."""
+    if not fold_summaries:
+        return
+
+    config = vars(args).copy()
+    config["base_run_name"] = base_run_name
+    config["folds_completed"] = len(fold_summaries)
+    config["summary_scope"] = "best_validation_epoch_per_fold"
+
+    wandb.init(
+        project=args.wandb_project,
+        entity=args.wandb_entity,
+        name=f"{base_run_name}_cv_summary",
+        group=base_run_name,
+        job_type="cv_summary",
+        config=config,
+    )
+
+    columns = [
+        "Fold",
+        "Best Epoch",
+        "Best Val Loss",
+        "Best Val Accuracy",
+        "Best Val Balanced Accuracy",
+        "Best Val Macro F1",
+        "Best Val Weighted F1",
+        "Best Val Macro Precision",
+        "Best Val Macro Recall",
+    ]
+    table = wandb.Table(columns=columns)
+    for row in fold_summaries:
+        table.add_data(
+            row["fold"],
+            row["best_epoch"],
+            row["val_loss"],
+            row["val_accuracy"],
+            row["val_balanced_accuracy"],
+            row["val_macro_f1"],
+            row["val_weighted_f1"],
+            row["val_macro_precision"],
+            row["val_macro_recall"],
+        )
+
+    wandb.log({"cv/fold_best_validation_metrics": table})
+
+    metric_keys = [
+        ("val_loss", "best_val_loss"),
+        ("val_accuracy", "best_val_accuracy"),
+        ("val_balanced_accuracy", "best_val_balanced_accuracy"),
+        ("val_macro_f1", "best_val_macro_f1"),
+        ("val_weighted_f1", "best_val_weighted_f1"),
+        ("val_macro_precision", "best_val_macro_precision"),
+        ("val_macro_recall", "best_val_macro_recall"),
+    ]
+    aggregate = {}
+    std_ddof = 1 if len(fold_summaries) > 1 else 0
+    for key, summary_key in metric_keys:
+        values = np.asarray([row[key] for row in fold_summaries], dtype=float)
+        aggregate[f"cv/{summary_key}_mean"] = float(values.mean())
+        aggregate[f"cv/{summary_key}_std"] = float(values.std(ddof=std_ddof))
+
+    aggregate["cv/n_folds"] = len(fold_summaries)
+    aggregate["cv/std_ddof"] = std_ddof
+    # Aggregates are scalars, not a time-series: store them only in the run
+    # summary instead of also logging single-point metrics.
+    for key, value in aggregate.items():
+        wandb.run.summary[key] = value
+
+    wandb.finish()
+
+
 # ===========================================================================
 #  Main
 # ===========================================================================
@@ -395,6 +487,7 @@ def run_train(args: argparse.Namespace) -> None:
 
     # -- 3. CV splits ------------------------------------------------------
     splits = make_stratified_splits(dataset, args.n_splits, args.seed, args.train_size, args.cv_strategy)
+    fold_summaries = []
 
     for fold, (train_idx, val_idx) in enumerate(splits):
         print(f"\n{'='*60}\n  Fold {fold + 1}/{args.n_splits}\n{'='*60}")
@@ -406,10 +499,11 @@ def run_train(args: argparse.Namespace) -> None:
         config["fold"] = fold + 1
         config["fold_index"] = fold
         wandb.init(
-            project=args.wandb_project, 
+            project=args.wandb_project,
             entity=args.wandb_entity,
             name=fold_run_name,
             group=base_run_name,
+            job_type="fold",
             config=config,
         )
 
@@ -552,7 +646,9 @@ def run_train(args: argparse.Namespace) -> None:
                 best_f1 = val_m["macro_f1"]
                 best_epoch = epoch
                 best_val_snapshot = {
+                    "fold": fold + 1,
                     "epoch": epoch,
+                    "loss": val_loss,
                     "metrics": val_m,
                     "labels": val_labels.copy(),
                     "preds": val_preds.copy(),
@@ -575,8 +671,11 @@ def run_train(args: argparse.Namespace) -> None:
                 "val/best_per_class_metrics",
                 best_val_snapshot["metrics"]["per_class"],
             )
+            fold_summaries.append(_make_fold_summary(best_val_snapshot))
 
         wandb.finish()
+
+    _log_wandb_cv_summary(args, base_run_name, fold_summaries)
 
     print("\nAll folds completed.")
 
