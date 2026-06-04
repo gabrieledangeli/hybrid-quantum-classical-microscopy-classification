@@ -127,14 +127,14 @@ def parse_args() -> argparse.Namespace:
     # -- Classifier --------------------------------------------------------
     cl = parser.add_argument_group("Classifier")
     cl.add_argument("--classifier_network", type=str, default="resnet18",
-                    choices=["resnet18", "resnet34", "resnet50", "hybrid_tn"],
+                    choices=["resnet18", "resnet34", "resnet50", "hybrid_tn", "hybrid_vqc"],
                     help="Classifier architecture.")
     cl.add_argument("--classifier_pretrained", action="store_true",
-                    help="Use pretrained weights. For hybrid_tn this applies to the "
+                    help="Use pretrained weights. For hybrid models this applies to the "
                          "ResNet backbone unless --backbone_weights is provided.")
     cl.add_argument("--freeze_resnet_backbone", action="store_true",
                     help="Freeze ResNet stem + layer1-3. For pure ResNet, layer4 + fc "
-                         "stay trainable; for hybrid_tn, only layer4 stays trainable "
+                         "stay trainable; for hybrid models, only layer4 stays trainable "
                          "because the classifier head lives downstream.")
     cl.add_argument("--backbone", type=str, default="resnet18",
                     choices=["resnet18", "resnet34", "resnet50"],
@@ -142,11 +142,11 @@ def parse_args() -> argparse.Namespace:
     cl.add_argument("--backbone_weights", type=str, default=None,
                     help="Path to custom .pth backbone weights (e.g. RetCCL).")
 
-    # -- Hybrid TN + VQC --------------------------------------------------
-    hy = parser.add_argument_group("Hybrid TN + VQC")
+    # -- Hybrid models ----------------------------------------------------
+    hy = parser.add_argument_group("Hybrid models")
     hy.add_argument("--n_qubits", type=int, default=8,
-                    help="Number of TN sites/qubits. PEPS uses 16 fixed sites; "
-                         "TTN uses this as the number of final states.")
+                    help="Number of VQC qubits. For hybrid_tn, this is also the "
+                         "number of TN sites/final states. PEPS uses 16 fixed sites.")
     hy.add_argument("--ttn_leaves", type=int, default=64,
                     choices=[16, 32, 64, 128],
                     help="Number of input leaves for TTN.")
@@ -158,8 +158,8 @@ def parse_args() -> argparse.Namespace:
                     help="Hidden dimension of the per-site encoder MLP feeding the TN.")
     hy.add_argument("--tn_bridge", type=str, default="mps",
                     choices=["mps", "peps", "ttn"],
-                    help="Tensor-network bridge type. PEPS uses a fixed exact 4x4 topology; "
-                         "TTN uses --ttn_leaves leaves.")
+                    help="Tensor-network bridge type for hybrid_tn. PEPS uses a fixed "
+                         "exact 4x4 topology; TTN uses --ttn_leaves leaves.")
     hy.add_argument("--vqc_layers", type=int, default=2,
                     help="Parametrised VQC layers (also the number of data re-uploads).")
     hy.add_argument("--vqc_readout", type=str, default="z+zz",

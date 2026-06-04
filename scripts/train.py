@@ -36,7 +36,7 @@ from data.utils import (
     make_stratified_splits,
 )
 from models.classifiers import EndToEndModel, TensorNormalize, resnet_model
-from models.hybrid import hybrid_tn_model
+from models.hybrid import hybrid_tn_model, hybrid_vqc_model
 from models.losses import FocalLoss
 from processing.numpy_pipeline import RawProcessingPipeline
 from processing.torch_pipeline import (
@@ -177,6 +177,17 @@ def _build_classifier(args, n_classes: int):
             backbone_weights=args.backbone_weights,
             pretrained=args.classifier_pretrained,
         )
+    elif args.classifier_network == "hybrid_vqc":
+        return hybrid_vqc_model(
+            fc_out_features=n_classes,
+            n_qubits=args.n_qubits,
+            vqc_layers=args.vqc_layers,
+            vqc_readout=args.vqc_readout,
+            freeze_resnet=args.freeze_resnet_backbone,
+            backbone=args.backbone,
+            backbone_weights=args.backbone_weights,
+            pretrained=args.classifier_pretrained,
+        )
     elif args.classifier_network in ("resnet18", "resnet34", "resnet50"):
         return resnet_model(
             fc_out_features=n_classes,
@@ -285,6 +296,8 @@ def _make_base_run_name(args: argparse.Namespace, started_at: datetime) -> str:
     model_tag = args.classifier_network
     if args.classifier_network == "hybrid_tn":
         model_tag = f"{args.classifier_network}-{args.backbone}-{args.tn_bridge}{args.n_qubits}"
+    elif args.classifier_network == "hybrid_vqc":
+        model_tag = f"{args.classifier_network}-{args.backbone}-q{args.n_qubits}"
 
     return (
         f"{started_label}_{model_tag}"

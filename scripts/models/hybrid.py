@@ -1,7 +1,8 @@
-"""Hybrid Tensor-Network + Variational Quantum Circuit classifier.
+"""Hybrid Quantum-Classical classifiers.
 
 Architecture:
     ResNet backbone -> TN bridge (MPS / PEPS / TTN) -> PennyLane VQC -> BN -> linear head
+    ResNet backbone -> linear angle map -> PennyLane VQC -> BN -> linear head
 """
 
 from __future__ import annotations
@@ -877,6 +878,56 @@ class HybridTNClassifier(nn.Module):
         return self.q_proj(q_out)
 
 
+class SimpleHybridVQCClassifier(nn.Module):
+    """ResNet -> linear angle map -> VQC -> BN -> linear.
+
+    Minimal hybrid baseline without a tensor-network bridge. The
+    ResNet feature vector is normalised, projected directly to ``n_qubits``
+    angles, bounded with ``tanh``, and passed to the same VQC used by
+    ``HybridTNClassifier``.
+
+    Input:  ``(B, 3, H, W)``  Output: ``(B, n_classes)``
+    """
+
+    def __init__(
+        self,
+        n_classes: int,
+        n_qubits: int = 8,
+        vqc_layers: int = 2,
+        vqc_readout: str = "z+zz",
+        freeze_resnet: bool = False,
+        backbone: str = "resnet18",
+        backbone_weights: Optional[str] = None,
+        pretrained: bool = True,
+    ) -> None:
+        super().__init__()
+        self.n_classes = n_classes
+        self.n_qubits = n_qubits
+
+        self.resnet = _ResNetFeatureExtractor(
+            backbone=backbone,
+            weights_path=backbone_weights,
+            pretrained=pretrained,
+            freeze=freeze_resnet,
+        )
+        feat_dim = self.resnet.feature_dim
+
+        self.feature_norm = nn.LayerNorm(feat_dim)
+        self.angle_map = nn.Linear(feat_dim, n_qubits)
+        self.quantum = VariationalQuantumLayer(n_qubits, vqc_layers, readout=vqc_readout)
+
+        readout_dim = self.quantum.readout_dim
+        self.q_norm = nn.BatchNorm1d(readout_dim)
+        self.q_proj = nn.Linear(readout_dim, n_classes)
+        self.angle_scale = nn.Parameter(torch.tensor(0.75 * math.pi))
+
+    def forward(self, images: torch.Tensor) -> torch.Tensor:
+        feats = self.feature_norm(self.resnet(images))
+        q_in = torch.tanh(self.angle_map(feats)) * self.angle_scale
+        q_out = self.q_norm(self.quantum(q_in))
+        return self.q_proj(q_out)
+
+
 # -- Convenience factory --------------------------------------------------
 
 
@@ -910,4 +961,27 @@ def hybrid_tn_model(
         backbone_weights=backbone_weights,
         pretrained=pretrained,
         ttn_leaves=ttn_leaves,
+    )
+
+
+def hybrid_vqc_model(
+    fc_out_features: int,
+    n_qubits: int = 8,
+    vqc_layers: int = 2,
+    vqc_readout: str = "z+zz",
+    freeze_resnet: bool = False,
+    backbone: str = "resnet18",
+    backbone_weights: Optional[str] = None,
+    pretrained: bool = True,
+) -> SimpleHybridVQCClassifier:
+    """Factory for `SimpleHybridVQCClassifier`."""
+    return SimpleHybridVQCClassifier(
+        n_classes=fc_out_features,
+        n_qubits=n_qubits,
+        vqc_layers=vqc_layers,
+        vqc_readout=vqc_readout,
+        freeze_resnet=freeze_resnet,
+        backbone=backbone,
+        backbone_weights=backbone_weights,
+        pretrained=pretrained,
     )

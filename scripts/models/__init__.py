@@ -1,5 +1,5 @@
 from .classifiers import resnet_model, EndToEndModel, TensorNormalize
-from .hybrid import HybridTNClassifier, hybrid_tn_model
+from .hybrid import HybridTNClassifier, SimpleHybridVQCClassifier, hybrid_tn_model, hybrid_vqc_model
 from .losses import FocalLoss
 
 __all__ = [
@@ -7,6 +7,8 @@ __all__ = [
     "EndToEndModel",
     "TensorNormalize",
     "HybridTNClassifier",
+    "SimpleHybridVQCClassifier",
     "hybrid_tn_model",
+    "hybrid_vqc_model",
     "FocalLoss",
 ]
