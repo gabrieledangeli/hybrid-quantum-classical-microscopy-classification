@@ -800,6 +800,7 @@ class HybridTNClassifier(nn.Module):
         bridge_hidden_dim: int = 128,
         vqc_layers: int = 2,
         vqc_readout: str = "z+zz",
+        vqc_dropout: float = 0.0,
         freeze_resnet: bool = False,
         bridge_type: str = "mps",
         backbone: str = "resnet18",
@@ -829,6 +830,8 @@ class HybridTNClassifier(nn.Module):
                 f"TTN leaves must be greater than final states; "
                 f"got ttn_leaves={ttn_leaves}, n_qubits={n_qubits}."
             )
+        if not 0.0 <= vqc_dropout < 1.0:
+            raise ValueError(f"vqc_dropout must be in [0, 1), got {vqc_dropout}.")
 
         self.n_classes = n_classes
         self.n_qubits = n_qubits
@@ -880,13 +883,14 @@ class HybridTNClassifier(nn.Module):
         # correlator observables); size the head to match.
         readout_dim = self.quantum.readout_dim
         self.q_norm = nn.BatchNorm1d(readout_dim)
+        self.q_dropout = nn.Dropout(p=vqc_dropout) if vqc_dropout > 0.0 else nn.Identity()
         self.q_proj = nn.Linear(readout_dim, n_classes)
         self.angle_scale = nn.Parameter(torch.tensor(0.75 * math.pi))
 
     def forward(self, images: torch.Tensor) -> torch.Tensor:
         feats = self.resnet(images)
         q_in = self.tn_bridge(feats) * self.angle_scale
-        q_out = self.q_norm(self.quantum(q_in))
+        q_out = self.q_dropout(self.q_norm(self.quantum(q_in)))
         return self.q_proj(q_out)
 
 
@@ -907,12 +911,16 @@ class SimpleHybridVQCClassifier(nn.Module):
         n_qubits: int = 8,
         vqc_layers: int = 2,
         vqc_readout: str = "z+zz",
+        vqc_dropout: float = 0.0,
         freeze_resnet: bool = False,
         backbone: str = "resnet18",
         backbone_weights: Optional[str] = None,
         pretrained: bool = True,
     ) -> None:
         super().__init__()
+        if not 0.0 <= vqc_dropout < 1.0:
+            raise ValueError(f"vqc_dropout must be in [0, 1), got {vqc_dropout}.")
+
         self.n_classes = n_classes
         self.n_qubits = n_qubits
 
@@ -930,13 +938,14 @@ class SimpleHybridVQCClassifier(nn.Module):
 
         readout_dim = self.quantum.readout_dim
         self.q_norm = nn.BatchNorm1d(readout_dim)
+        self.q_dropout = nn.Dropout(p=vqc_dropout) if vqc_dropout > 0.0 else nn.Identity()
         self.q_proj = nn.Linear(readout_dim, n_classes)
         self.angle_scale = nn.Parameter(torch.tensor(0.75 * math.pi))
 
     def forward(self, images: torch.Tensor) -> torch.Tensor:
         feats = self.feature_norm(self.resnet(images))
         q_in = torch.tanh(self.angle_map(feats)) * self.angle_scale
-        q_out = self.q_norm(self.quantum(q_in))
+        q_out = self.q_dropout(self.q_norm(self.quantum(q_in)))
         return self.q_proj(q_out)
 
 
@@ -951,6 +960,7 @@ def hybrid_tn_model(
     tn_hidden_dim: int = 128,
     vqc_layers: int = 2,
     vqc_readout: str = "z+zz",
+    vqc_dropout: float = 0.0,
     freeze_resnet: bool = False,
     tn_bridge: str = "mps",
     backbone: str = "resnet18",
@@ -967,6 +977,7 @@ def hybrid_tn_model(
         bridge_hidden_dim=tn_hidden_dim,
         vqc_layers=vqc_layers,
         vqc_readout=vqc_readout,
+        vqc_dropout=vqc_dropout,
         freeze_resnet=freeze_resnet,
         bridge_type=tn_bridge,
         backbone=backbone,
@@ -981,6 +992,7 @@ def hybrid_vqc_model(
     n_qubits: int = 8,
     vqc_layers: int = 2,
     vqc_readout: str = "z+zz",
+    vqc_dropout: float = 0.0,
     freeze_resnet: bool = False,
     backbone: str = "resnet18",
     backbone_weights: Optional[str] = None,
@@ -992,6 +1004,7 @@ def hybrid_vqc_model(
         n_qubits=n_qubits,
         vqc_layers=vqc_layers,
         vqc_readout=vqc_readout,
+        vqc_dropout=vqc_dropout,
         freeze_resnet=freeze_resnet,
         backbone=backbone,
         backbone_weights=backbone_weights,

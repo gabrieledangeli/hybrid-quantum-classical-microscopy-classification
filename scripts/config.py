@@ -168,6 +168,8 @@ def parse_args() -> argparse.Namespace:
                          "nearest-neighbour <ZZ> ring correlators (default); 'z+zz_mean' "
                          "adds one pooled mean of the <ZZ> ring correlators; 'bloch' the "
                          "full (<X>,<Y>,<Z>) vector; 'full' adds {XX,YY,ZZ} ring correlators.")
+    hy.add_argument("--vqc_dropout", type=float, default=0.0,
+                    help="Dropout probability applied to the VQC read-out before q_proj.")
 
     # -- Adversarial -------------------------------------------------------
     parser.add_argument("--adv_parameters",

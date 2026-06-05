@@ -172,6 +172,7 @@ def _build_classifier(args, n_classes: int):
             tn_bridge=args.tn_bridge,
             vqc_layers=args.vqc_layers,
             vqc_readout=args.vqc_readout,
+            vqc_dropout=args.vqc_dropout,
             freeze_resnet=args.freeze_resnet_backbone,
             backbone=args.backbone,
             backbone_weights=args.backbone_weights,
@@ -183,6 +184,7 @@ def _build_classifier(args, n_classes: int):
             n_qubits=args.n_qubits,
             vqc_layers=args.vqc_layers,
             vqc_readout=args.vqc_readout,
+            vqc_dropout=args.vqc_dropout,
             freeze_resnet=args.freeze_resnet_backbone,
             backbone=args.backbone,
             backbone_weights=args.backbone_weights,
@@ -495,6 +497,8 @@ def run_train(args: argparse.Namespace) -> None:
         raise ValueError(f"--non_rare_aug_prob must be in [0, 1], got {args.non_rare_aug_prob}")
     if not 0.0 <= args.undersample_strength <= 1.0:
         raise ValueError(f"--undersample_strength must be in [0, 1], got {args.undersample_strength}")
+    if not 0.0 <= args.vqc_dropout < 1.0:
+        raise ValueError(f"--vqc_dropout must be in [0, 1), got {args.vqc_dropout}")
 
     base_run_name = _make_base_run_name(args, datetime.now())
 
