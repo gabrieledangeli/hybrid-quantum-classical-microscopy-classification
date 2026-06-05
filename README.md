@@ -32,7 +32,7 @@ This project investigates whether **tensor-network (TN) bridges** and **variatio
 | **RAW image processing** | Static (NumPy), parametrised (differentiable PyTorch), and neural-network (U-Net++) pipelines |
 | **Class-imbalance handling** | Weighted loss (Effective Number of Samples), weighted random sampling, soft undersampling with warm-up, conditional augmentation for rare classes |
 | **Cross-validation** | Stratified K-Fold and Stratified Shuffle-Split |
-| **Quantum simulation** | PennyLane VQC with data re-uploading, trainable encoding frequencies, and a configurable read-out (`--vqc_readout`: single-qubit `<Z>`, `<ZZ>` ring correlators, full Bloch vector, or `XX/YY/ZZ` correlators); automatic backend selection (`lightning.gpu` -> `lightning.qubit` -> `default.qubit` backprop fallback) |
+| **Quantum simulation** | PennyLane VQC with data re-uploading, trainable encoding frequencies, and a configurable read-out (`--vqc_readout`: single-qubit `<Z>`, individual `<ZZ>` ring correlators, pooled mean `<ZZ>` ring correlator, full Bloch vector, or `XX/YY/ZZ` correlators); automatic backend selection (`lightning.gpu` -> `lightning.qubit` -> `default.qubit` backprop fallback) |
 | **Experiment tracking** | Weights & Biases integration (metrics, confusion matrices, per-class stats, gradient tracking) |
 
 ---

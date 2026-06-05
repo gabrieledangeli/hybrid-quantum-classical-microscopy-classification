@@ -163,9 +163,10 @@ def parse_args() -> argparse.Namespace:
     hy.add_argument("--vqc_layers", type=int, default=2,
                     help="Parametrised VQC layers (also the number of data re-uploads).")
     hy.add_argument("--vqc_readout", type=str, default="z+zz",
-                    choices=["z", "z+zz", "bloch", "full"],
+                    choices=["z", "z+zz", "z+zz_mean", "bloch", "full"],
                     help="VQC read-out observables: 'z' single-qubit <Z>; 'z+zz' adds "
-                         "nearest-neighbour <ZZ> ring correlators (default); 'bloch' the "
+                         "nearest-neighbour <ZZ> ring correlators (default); 'z+zz_mean' "
+                         "adds one pooled mean of the <ZZ> ring correlators; 'bloch' the "
                          "full (<X>,<Y>,<Z>) vector; 'full' adds {XX,YY,ZZ} ring correlators.")
 
     # -- Adversarial -------------------------------------------------------

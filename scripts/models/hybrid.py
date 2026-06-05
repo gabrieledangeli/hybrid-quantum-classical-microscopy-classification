@@ -578,6 +578,8 @@ class VariationalQuantumLayer(nn.Module):
     * ``"z"``     single-qubit ``<Z_i>`` only (width ``n_qubits``).
     * ``"z+zz"``  ``<Z_i>`` plus nearest-neighbour ``<Z_i Z_j>`` correlators on
       the entangling ring (default; exposes entanglement to the head).
+    * ``"z+zz_mean"`` ``<Z_i>`` plus one pooled mean of the nearest-neighbour
+      ``<Z_i Z_j>`` ring correlators.
     * ``"bloch"`` the full local Bloch vector ``(<X_i>, <Y_i>, <Z_i>)``.
     * ``"full"``  Bloch vector plus ``{XX, YY, ZZ}`` ring correlators.
 
@@ -587,7 +589,7 @@ class VariationalQuantumLayer(nn.Module):
     expensive) read-out. The flat output width is ``readout_dim``.
     """
 
-    VALID_READOUTS = ("z", "z+zz", "bloch", "full")
+    VALID_READOUTS = ("z", "z+zz", "z+zz_mean", "bloch", "full")
 
     def __init__(self, n_qubits: int, n_layers: int, readout: str = "z+zz") -> None:
         super().__init__()
@@ -608,15 +610,17 @@ class VariationalQuantumLayer(nn.Module):
         # Read-out observables: each term is a tuple of (Pauli, wire) factors.
         # Single-qubit terms first, then correlators, so ``"z+zz"`` keeps its
         # original [<Z_i>..., <Z_iZ_j>...] ordering.
-        single_bases = {"z": "Z", "z+zz": "Z", "bloch": "XYZ", "full": "XYZ"}[readout]
-        corr_bases = {"z": "", "z+zz": "Z", "bloch": "", "full": "XYZ"}[readout]
+        single_bases = {"z": "Z", "z+zz": "Z", "z+zz_mean": "Z", "bloch": "XYZ", "full": "XYZ"}[readout]
+        corr_bases = {"z": "", "z+zz": "Z", "z+zz_mean": "", "bloch": "", "full": "XYZ"}[readout]
         spec = []
         for p in single_bases:
             spec += [((p, i),) for i in range(n_qubits)]
         for p in corr_bases:
             spec += [((p, a), (p, b)) for a, b in pairs]
+        if readout == "z+zz_mean" and pairs:
+            spec.append(("mean_corr", "Z", tuple(pairs)))
 
-        self.corr_pairs = pairs if corr_bases else []
+        self.corr_pairs = pairs if (corr_bases or readout == "z+zz_mean") else []
         self.readout_spec = spec
         self.readout_dim = len(spec)
 
@@ -643,12 +647,20 @@ class VariationalQuantumLayer(nn.Module):
 
         pauli = {"X": qml.PauliX, "Y": qml.PauliY, "Z": qml.PauliZ}
 
-        def _observable(term):
+        def _pauli_product(term):
             (p0, w0), rest = term[0], term[1:]
             op = pauli[p0](w0)
             for p, w in rest:
                 op = op @ pauli[p](w)
             return op
+
+        def _observable(term):
+            if term and term[0] == "mean_corr":
+                _, basis, corr_pairs = term
+                coeff = 1.0 / len(corr_pairs)
+                ops = [_pauli_product(((basis, a), (basis, b))) for a, b in corr_pairs]
+                return qml.Hamiltonian([coeff] * len(ops), ops)
+            return _pauli_product(term)
 
         @qml.qnode(dev, interface="torch", diff_method=diff)
         def circuit(inputs, weights, freqs):
