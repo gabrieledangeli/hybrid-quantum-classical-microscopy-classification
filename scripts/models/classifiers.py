@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import List, Optional, Set
+from typing import Dict, List, Mapping, Optional, Set
 
 import torch
 import torch.nn as nn
@@ -25,14 +25,71 @@ _RESNET_REGISTRY = {
     "resnet50": (resnet50, ResNet50_Weights.DEFAULT),
 }
 
+_RESNET_BACKBONE_ROOTS = ("conv1", "bn1", "layer1", "layer2", "layer3", "layer4")
+
+
+def _is_resnet_backbone_key(key: str) -> bool:
+    """Return True for torchvision ResNet backbone keys, excluding ``fc``."""
+    root = key.split(".", 1)[0]
+    return root in _RESNET_BACKBONE_ROOTS
+
+
+def load_resnet_backbone_weights(model: ResNet, path: str) -> Dict[str, int]:
+    """Load a strict ResNet backbone-only state dict into ``model``."""
+    backbone_state = torch.load(path, map_location="cpu", weights_only=False)
+    if not isinstance(backbone_state, Mapping):
+        raise ValueError(f"Backbone checkpoint at {path} is not a state dict.")
+
+    invalid_keys = [
+        str(key) for key, value in backbone_state.items()
+        if not torch.is_tensor(value) or not _is_resnet_backbone_key(str(key))
+    ]
+    if invalid_keys:
+        raise ValueError(
+            "Backbone checkpoint must contain only ResNet backbone tensor keys "
+            f"(conv1, bn1, layer1-4). Invalid keys: {invalid_keys[:10]}"
+        )
+
+    missing, unexpected = model.load_state_dict(backbone_state, strict=False)
+    missing_backbone = [
+        key for key in missing
+        if key.split(".", 1)[0] in _RESNET_BACKBONE_ROOTS
+    ]
+    if missing_backbone:
+        raise ValueError(f"Backbone checkpoint is missing ResNet keys: {missing_backbone[:10]}")
+    if unexpected:
+        raise ValueError(f"Backbone checkpoint has unexpected keys: {unexpected[:10]}")
+
+    return {
+        "loaded_keys": len(backbone_state),
+    }
+
+
+def extract_resnet_backbone_state_dict(model: nn.Module) -> Dict[str, torch.Tensor]:
+    """Extract only torchvision-style ResNet backbone tensors from ``model``."""
+    backbone_state = {
+        key: value.detach().cpu().clone()
+        for key, value in model.state_dict().items()
+        if _is_resnet_backbone_key(key)
+    }
+    if not backbone_state:
+        raise ValueError("No ResNet backbone tensors were found in the model.")
+    return backbone_state
+
 
 def resnet_model(
     fc_out_features: int,
     model_name: str = "resnet18",
     pretrained: bool = True,
     freeze_backbone: bool = False,
+    backbone_weights: Optional[str] = None,
 ) -> ResNet:
     """Build a ResNet with a replaced final FC layer.
+
+    ``pretrained`` controls whether the backbone is initialised from pretrained
+    weights. If ``backbone_weights`` is provided, it is used as the pretrained
+    source; otherwise torchvision ImageNet weights are used. The final ``fc``
+    layer is always freshly initialised for the requested label space.
 
     When *freeze_backbone* is ``True``, only ``layer4`` (the last residual
     stage) and the freshly-initialised ``fc`` head are trainable; everything
@@ -45,14 +102,24 @@ def resnet_model(
     model_name = model_name.lower().strip()
     if model_name not in _RESNET_REGISTRY:
         raise ValueError(f"Unknown model: '{model_name}'. Choose from {list(_RESNET_REGISTRY)}.")
+    if backbone_weights and not pretrained:
+        raise ValueError("backbone_weights requires pretrained=True.")
     if freeze_backbone and not pretrained:
         raise ValueError(
-            "freeze_backbone=True requires pretrained=True; otherwise stem/layer1-3 "
-            "would remain randomly initialized and frozen."
+            "freeze_backbone=True requires pretrained=True; "
+            "otherwise stem/layer1-3 would remain randomly initialized and frozen."
         )
 
     build_fn, default_weights = _RESNET_REGISTRY[model_name]
-    model = build_fn(weights=default_weights if pretrained else None)
+    model = build_fn(weights=None if backbone_weights or not pretrained else default_weights)
+    if pretrained and backbone_weights:
+        info = load_resnet_backbone_weights(model, backbone_weights)
+        print(
+            f"[Backbone] Loaded custom {model_name} backbone from {backbone_weights} "
+            f"({info['loaded_keys']} tensors)"
+        )
+    elif pretrained:
+        print(f"[Backbone] ImageNet-pretrained {model_name}")
     model.fc = nn.Linear(model.fc.in_features, fc_out_features, bias=True)
 
     if freeze_backbone:

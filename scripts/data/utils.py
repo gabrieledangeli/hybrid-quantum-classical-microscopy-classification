@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 from collections import Counter
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 import numpy as np
 import tifffile
@@ -41,6 +41,7 @@ def make_stratified_splits(
     seed: int,
     train_size: float = 0.7,
     strategy: str = "kfold",
+    indices: Optional[List[int]] = None,
 ) -> List[Tuple[List[int], List[int]]]:
     """Create stratified cross-validation splits.
 
@@ -52,11 +53,15 @@ def make_stratified_splits(
             ``kfold``, the train/validation ratio is determined by
             ``n_splits`` and this argument is ignored.
         strategy: ``'kfold'`` or ``'shuffle_split'``.
+        indices: Optional subset of original dataset indices to split. When
+            provided, returned train/validation indices still refer to the
+            original dataset.
 
     Returns:
         List of ``(train_indices, val_indices)`` tuples.
     """
-    y = np.asarray(dataset.labels)
+    split_indices = list(range(len(dataset.labels))) if indices is None else list(indices)
+    y = np.asarray([dataset.labels[i] for i in split_indices])
 
     if strategy not in ("kfold", "shuffle_split"):
         raise ValueError(f"Unknown CV strategy: '{strategy}'. Use 'kfold' or 'shuffle_split'.")
@@ -97,7 +102,10 @@ def make_stratified_splits(
 
     dummy_x = np.zeros(len(y))
     return [
-        (idx_train.tolist(), idx_val.tolist())
+        (
+            [split_indices[i] for i in idx_train],
+            [split_indices[i] for i in idx_val],
+        )
         for idx_train, idx_val in cv.split(dummy_x, y)
     ]
 

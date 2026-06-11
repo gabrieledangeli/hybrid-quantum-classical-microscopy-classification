@@ -14,7 +14,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from models.classifiers import _RESNET_REGISTRY
+from .classifiers import _RESNET_REGISTRY, load_resnet_backbone_weights
 
 # -- Maths helpers ---------------------------------------------------------
 
@@ -688,8 +688,12 @@ class VariationalQuantumLayer(nn.Module):
         self.qlayer = qml.qnn.TorchLayer(circuit, weight_shapes)
         # Start re-uploading at unit frequency so the initial encoding scale
         # matches the (separately learnable) ``angle_scale`` in the classifier.
+        # Small-angle variational init keeps the circuit near the identity,
+        # avoiding the flat (barren-plateau-prone) regions reached by the
+        # TorchLayer default U(0, 2*pi) init.
         with torch.no_grad():
             self.qlayer.freqs.fill_(1.0)
+            nn.init.normal_(self.qlayer.weights, mean=0.0, std=0.1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.qlayer(x)
@@ -705,12 +709,11 @@ class _ResNetFeatureExtractor(nn.Module):
 
     Args:
         backbone: One of ``resnet18``/``resnet34``/``resnet50``.
-        weights_path: Optional path to custom weights. If given,
-            *pretrained* is ignored and the custom checkpoint is loaded with
-            lenient key matching.
-        pretrained: When ``True`` and *weights_path* is ``None``, load
-            ImageNet-pretrained torchvision weights. When ``False``, the
-            backbone is randomly initialised.
+        weights_path: Optional custom pretrained-weight source. It is valid
+            only when *pretrained* is ``True``.
+        pretrained: When ``True``, load either *weights_path* or ImageNet
+            torchvision weights. When ``False``, the backbone is randomly
+            initialised.
         freeze: When ``True``, freeze every parameter except ``layer4`` (the
             final residual stage), enabling efficient fine-tuning.
     """
@@ -726,14 +729,19 @@ class _ResNetFeatureExtractor(nn.Module):
         backbone = backbone.lower().strip()
         if backbone not in _FEAT_DIM:
             raise ValueError(f"Unknown backbone '{backbone}'. Choose from {list(_FEAT_DIM)}.")
+        if weights_path and not pretrained:
+            raise ValueError("weights_path requires pretrained=True.")
         self.feature_dim = _FEAT_DIM[backbone]
 
         build_fn, default_w = _RESNET_REGISTRY[backbone]
 
-        if weights_path:
+        if pretrained and weights_path:
             m = build_fn(weights=None)
-            self._load_custom(m, weights_path)
-            print(f"[Backbone] Loaded custom weights ({backbone}) from {weights_path}")
+            info = load_resnet_backbone_weights(m, weights_path)
+            print(
+                f"[Backbone] Loaded custom weights ({backbone}) from {weights_path} "
+                f"({info['loaded_keys']} tensors)"
+            )
         elif pretrained:
             m = build_fn(weights=default_w)
             print(f"[Backbone] ImageNet-pretrained {backbone} ({self.feature_dim}-d)")
@@ -748,35 +756,6 @@ class _ResNetFeatureExtractor(nn.Module):
                 p.requires_grad = False
             for p in m.layer4.parameters():
                 p.requires_grad = True
-
-    @staticmethod
-    def _load_custom(model: nn.Module, path: str) -> None:
-        raw = torch.load(path, map_location="cpu", weights_only=False)
-        if isinstance(raw, dict):
-            for key in ("state_dict", "model_state_dict", "model", "teacher"):
-                if key in raw:
-                    raw = raw[key]
-                    break
-        if not isinstance(raw, dict):
-            raise ValueError(f"Cannot interpret checkpoint at {path}.")
-
-        skip_prefixes = ("fc.", "head.", "classifier.")
-        strip_prefixes = ("module.", "backbone.", "encoder.", "resnet.", "model.")
-        cleaned = {}
-        for k, v in raw.items():
-            for pfx in strip_prefixes:
-                if k.startswith(pfx):
-                    k = k[len(pfx):]
-            if any(k.startswith(s) for s in skip_prefixes):
-                continue
-            cleaned[k] = v
-
-        missing, unexpected = model.load_state_dict(cleaned, strict=False)
-        missing_bb = [k for k in missing if not k.startswith("fc.")]
-        if missing_bb:
-            print(f"[Backbone] Warning missing keys: {missing_bb[:10]}")
-        if unexpected:
-            print(f"[Backbone] Warning unexpected keys: {unexpected[:10]}")
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.backbone(x).flatten(1)

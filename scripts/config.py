@@ -61,6 +61,10 @@ def parse_args() -> argparse.Namespace:
                     help="Random seed for reproducibility.")
     cv.add_argument("--train_size", type=float, default=0.7,
                     help="Proportion of the dataset in the train split (Default: 0.7).")
+    cv.add_argument("--test_size", type=float, default=0.0,
+                    help="Optional fixed stratified test holdout fraction. The holdout "
+                         "is created before CV and is used only for final "
+                         "evaluation of the best validation checkpoint. Default 0 disables it.")
 
     # -- Imbalance handling ------------------------------------------------
     ib = parser.add_argument_group("Imbalance handling")
@@ -123,6 +127,10 @@ def parse_args() -> argparse.Namespace:
     tr.add_argument("--epochs", type=int, default=50)
     tr.add_argument("--save_model", action="store_true",
                     help="Save the best model checkpoint.")
+    tr.add_argument("--save_backbone", action="store_true",
+                    help="For ResNet classifiers, save a backbone checkpoint "
+                         "at the best validation epoch. Useful for MLL23 -> "
+                         "Microscopy transfer.")
 
     # -- Classifier --------------------------------------------------------
     cl = parser.add_argument_group("Classifier")
@@ -130,8 +138,8 @@ def parse_args() -> argparse.Namespace:
                     choices=["resnet18", "resnet34", "resnet50", "hybrid_tn", "hybrid_vqc"],
                     help="Classifier architecture.")
     cl.add_argument("--classifier_pretrained", action="store_true",
-                    help="Use pretrained weights. For hybrid models this applies to the "
-                         "ResNet backbone unless --backbone_weights is provided.")
+                    help="Use pretrained ResNet backbone weights. If --backbone_weights "
+                         "is omitted, torchvision ImageNet weights are used.")
     cl.add_argument("--freeze_resnet_backbone", action="store_true",
                     help="Freeze ResNet stem + layer1-3. For pure ResNet, layer4 + fc "
                          "stay trainable; for hybrid models, only layer4 stays trainable "
@@ -140,7 +148,9 @@ def parse_args() -> argparse.Namespace:
                     choices=["resnet18", "resnet34", "resnet50"],
                     help="ResNet backbone for the hybrid model.")
     cl.add_argument("--backbone_weights", type=str, default=None,
-                    help="Path to custom .pth backbone weights (e.g. RetCCL).")
+                    help="Path to custom .pth ResNet backbone weights used when "
+                         "--classifier_pretrained is enabled. If omitted, "
+                         "--classifier_pretrained uses ImageNet weights.")
 
     # -- Hybrid models ----------------------------------------------------
     hy = parser.add_argument_group("Hybrid models")
@@ -192,6 +202,10 @@ def parse_args() -> argparse.Namespace:
                     help="Enable wandb.watch() gradient tracking.")
 
     args = parser.parse_args()
+    if args.backbone_weights and not args.classifier_pretrained:
+        parser.error("--backbone_weights requires --classifier_pretrained.")
+    if args.save_backbone and args.classifier_network not in ("resnet18", "resnet34", "resnet50"):
+        parser.error("--save_backbone is supported only with plain ResNet classifiers.")
     if args.data_dir is None:
         if args.dataset == "MLL23":
             if not MLL23_DATA_DIR:

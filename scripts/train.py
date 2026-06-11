@@ -8,7 +8,7 @@ Usage from the `scripts/` directory:
 from __future__ import annotations
 
 import os
-import sys
+import json
 import argparse
 from collections import Counter
 from datetime import datetime
@@ -35,7 +35,12 @@ from data.utils import (
     get_current_undersample_strength,
     make_stratified_splits,
 )
-from models.classifiers import EndToEndModel, TensorNormalize, resnet_model
+from models.classifiers import (
+    EndToEndModel,
+    TensorNormalize,
+    extract_resnet_backbone_state_dict,
+    resnet_model,
+)
 from models.hybrid import hybrid_tn_model, hybrid_vqc_model
 from models.losses import FocalLoss
 from processing.numpy_pipeline import RawProcessingPipeline
@@ -196,6 +201,7 @@ def _build_classifier(args, n_classes: int):
             model_name=args.classifier_network,
             pretrained=args.classifier_pretrained,
             freeze_backbone=args.freeze_resnet_backbone,
+            backbone_weights=args.backbone_weights,
         )
     else:
         raise ValueError(f"Unsupported classifier network: {args.classifier_network}.")
@@ -228,7 +234,9 @@ def _build_optimizer(args, model: nn.Module):
     """Differential LR optimizer: backbone (low lr) vs head (high lr)."""
     backbone_params, head_params = [], []
 
-    if args.classifier_network in ("resnet18", "resnet34", "resnet50") and args.classifier_pretrained:
+    uses_pretrained_backbone = bool(args.classifier_pretrained)
+
+    if args.classifier_network in ("resnet18", "resnet34", "resnet50") and uses_pretrained_backbone:
         for name, p in model.classifier.named_parameters():
             if not p.requires_grad:
                 continue
@@ -324,6 +332,50 @@ def _make_run_dir(args: argparse.Namespace, base_run_name: str, fold: int) -> st
     )
 
 
+def _make_backbone_metadata(
+    args: argparse.Namespace,
+    display_class_names: List[str],
+    fold: int,
+    epoch: int,
+    val_loss: float,
+    val_metrics: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Metadata saved next to reusable backbone checkpoints."""
+    return {
+        "created_at": datetime.now().strftime("%d-%m-%Y_%H-%M"),
+        "selection_metric": "val_macro_f1",
+        "dataset": args.dataset,
+        "processing_mode": args.processing_mode,
+        "classifier_network": args.classifier_network,
+        "fold": fold + 1,
+        "epoch": epoch,
+        "seed": args.seed,
+        "classes": display_class_names,
+        "val_loss": float(val_loss),
+        "val_metrics": val_metrics,
+    }
+
+
+def _save_backbone_checkpoint(
+    model: nn.Module,
+    run_dir: str,
+    metadata: Dict[str, Any],
+) -> None:
+    """Save only reusable ResNet backbone tensors plus a readable metadata file."""
+    backbone_state = extract_resnet_backbone_state_dict(model)
+    torch.save(backbone_state, os.path.join(run_dir, "backbone.pth"))
+    with open(os.path.join(run_dir, "backbone_metadata.json"), "w", encoding="utf-8") as f:
+        json.dump(metadata, f, indent=2, sort_keys=True)
+
+
+def _copy_state_dict_to_cpu(model: nn.Module) -> Dict[str, torch.Tensor]:
+    """Snapshot the current model state without keeping GPU tensor references."""
+    return {
+        key: value.detach().cpu().clone()
+        for key, value in model.state_dict().items()
+    }
+
+
 def _log_wandb_confusion_matrix(
     key: str,
     labels: np.ndarray,
@@ -355,10 +407,13 @@ def _log_wandb_per_class_table(key: str, per_class: List[Dict[str, Any]]) -> Non
         print(f"[Warning] W&B per-class table log failed for '{key}': {exc}")
 
 
-def _make_fold_summary(best_val_snapshot: Dict[str, Any]) -> Dict[str, Any]:
+def _make_fold_summary(
+    best_val_snapshot: Dict[str, Any],
+    test_snapshot: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     """Extract the best validation metrics that should be aggregated across folds."""
     metrics = best_val_snapshot["metrics"]
-    return {
+    summary = {
         "fold": best_val_snapshot["fold"],
         "best_epoch": best_val_snapshot["epoch"],
         "val_loss": best_val_snapshot["loss"],
@@ -369,6 +424,18 @@ def _make_fold_summary(best_val_snapshot: Dict[str, Any]) -> Dict[str, Any]:
         "val_macro_precision": metrics["macro_precision"],
         "val_macro_recall": metrics["macro_recall"],
     }
+    if test_snapshot is not None:
+        test_metrics = test_snapshot["metrics"]
+        summary.update({
+            "test_loss": test_snapshot["loss"],
+            "test_accuracy": test_metrics["accuracy"],
+            "test_balanced_accuracy": test_metrics["balanced_accuracy"],
+            "test_macro_f1": test_metrics["macro_f1"],
+            "test_weighted_f1": test_metrics["weighted_f1"],
+            "test_macro_precision": test_metrics["macro_precision"],
+            "test_macro_recall": test_metrics["macro_recall"],
+        })
+    return summary
 
 
 def _log_wandb_cv_summary(
@@ -394,6 +461,8 @@ def _log_wandb_cv_summary(
         config=config,
     )
 
+    has_test = any("test_accuracy" in row for row in fold_summaries)
+
     columns = [
         "Fold",
         "Best Epoch",
@@ -405,9 +474,19 @@ def _log_wandb_cv_summary(
         "Best Val Macro Precision",
         "Best Val Macro Recall",
     ]
+    if has_test:
+        columns.extend([
+            "Test Loss",
+            "Test Accuracy",
+            "Test Balanced Accuracy",
+            "Test Macro F1",
+            "Test Weighted F1",
+            "Test Macro Precision",
+            "Test Macro Recall",
+        ])
     table = wandb.Table(columns=columns)
     for row in fold_summaries:
-        table.add_data(
+        values = [
             row["fold"],
             row["best_epoch"],
             row["val_loss"],
@@ -417,7 +496,18 @@ def _log_wandb_cv_summary(
             row["val_weighted_f1"],
             row["val_macro_precision"],
             row["val_macro_recall"],
-        )
+        ]
+        if has_test:
+            values.extend([
+                row.get("test_loss"),
+                row.get("test_accuracy"),
+                row.get("test_balanced_accuracy"),
+                row.get("test_macro_f1"),
+                row.get("test_weighted_f1"),
+                row.get("test_macro_precision"),
+                row.get("test_macro_recall"),
+            ])
+        table.add_data(*values)
 
     wandb.log({"cv/fold_best_validation_metrics": table})
 
@@ -430,6 +520,16 @@ def _log_wandb_cv_summary(
         ("val_macro_precision", "best_val_macro_precision"),
         ("val_macro_recall", "best_val_macro_recall"),
     ]
+    if has_test:
+        metric_keys.extend([
+            ("test_loss", "test_loss"),
+            ("test_accuracy", "test_accuracy"),
+            ("test_balanced_accuracy", "test_balanced_accuracy"),
+            ("test_macro_f1", "test_macro_f1"),
+            ("test_weighted_f1", "test_weighted_f1"),
+            ("test_macro_precision", "test_macro_precision"),
+            ("test_macro_recall", "test_macro_recall"),
+        ])
     aggregate = {}
     std_ddof = 1 if len(fold_summaries) > 1 else 0
     for key, summary_key in metric_keys:
@@ -499,11 +599,37 @@ def run_train(args: argparse.Namespace) -> None:
         raise ValueError(f"--undersample_strength must be in [0, 1], got {args.undersample_strength}")
     if not 0.0 <= args.vqc_dropout < 1.0:
         raise ValueError(f"--vqc_dropout must be in [0, 1), got {args.vqc_dropout}")
+    if not 0.0 <= args.test_size < 1.0:
+        raise ValueError(f"--test_size must be in [0, 1), got {args.test_size}")
 
     base_run_name = _make_base_run_name(args, datetime.now())
 
     # -- 3. CV splits ------------------------------------------------------
-    splits = make_stratified_splits(dataset, args.n_splits, args.seed, args.train_size, args.cv_strategy)
+    train_val_pool_idx = None
+    test_idx = []
+    if args.test_size > 0.0:
+        train_val_pool_idx, test_idx = make_stratified_splits(
+            dataset,
+            n_splits=1,
+            seed=args.seed,
+            train_size=1.0 - args.test_size,
+            strategy="shuffle_split",
+        )[0]
+
+    if test_idx:
+        print(
+            f"Fixed stratified test holdout: {len(test_idx)} samples "
+            f"({args.test_size:.1%}); train/val pool: {len(train_val_pool_idx)} samples"
+        )
+
+    splits = make_stratified_splits(
+        dataset,
+        args.n_splits,
+        args.seed,
+        args.train_size,
+        args.cv_strategy,
+        indices=train_val_pool_idx,
+    )
     fold_summaries = []
 
     for fold, (train_idx, val_idx) in enumerate(splits):
@@ -595,10 +721,17 @@ def run_train(args: argparse.Namespace) -> None:
             shuffle=False,
             **ldr_kw,
         )
+        test_loader = None
+        if test_idx:
+            test_loader = DataLoader(
+                Subset(dataset, test_idx),
+                shuffle=False,
+                **ldr_kw,
+            )
 
         # -- Save dir ------------------------------------------------------
         run_dir = _make_run_dir(args, base_run_name, fold)
-        if args.save_model:
+        if args.save_model or args.save_backbone:
             os.makedirs(run_dir, exist_ok=True)
             with open(os.path.join(run_dir, "run_config.txt"), "w", encoding="utf-8") as f:
                 run_config = {
@@ -613,6 +746,7 @@ def run_train(args: argparse.Namespace) -> None:
         best_f1 = float("-inf")
         best_epoch: Optional[int] = None
         best_val_snapshot: Optional[Dict[str, Any]] = None
+        best_state_dict: Optional[Dict[str, torch.Tensor]] = None
         if args.wandb_watch:
             wandb.watch(model, log="gradients", log_freq=100)
 
@@ -672,7 +806,20 @@ def run_train(args: argparse.Namespace) -> None:
                 }
                 if args.save_model:
                     torch.save(model.state_dict(), os.path.join(run_dir, "best_model.pth"))
+                if args.save_backbone:
+                    metadata = _make_backbone_metadata(
+                        args,
+                        display_class_names,
+                        fold,
+                        epoch,
+                        val_loss,
+                        val_m,
+                    )
+                    _save_backbone_checkpoint(model.classifier, run_dir, metadata)
+                if test_loader is not None:
+                    best_state_dict = _copy_state_dict_to_cpu(model)
 
+        test_snapshot: Optional[Dict[str, Any]] = None
         if best_val_snapshot is not None:
             wandb.run.summary["best_epoch"] = best_epoch
             wandb.run.summary["best_val_macro_f1"] = best_val_snapshot["metrics"]["macro_f1"]
@@ -688,7 +835,46 @@ def run_train(args: argparse.Namespace) -> None:
                 "val/best_per_class_metrics",
                 best_val_snapshot["metrics"]["per_class"],
             )
-            fold_summaries.append(_make_fold_summary(best_val_snapshot))
+
+            if test_loader is not None and best_state_dict is not None:
+                model.load_state_dict(best_state_dict)
+                test_loss, test_m, test_labels, test_preds = validate(
+                    model,
+                    test_loader,
+                    criterion,
+                    DEVICE,
+                    display_class_names,
+                )
+                test_snapshot = {
+                    "loss": test_loss,
+                    "metrics": test_m,
+                    "labels": test_labels.copy(),
+                    "preds": test_preds.copy(),
+                }
+                wandb.log({
+                    "test/loss": test_loss,
+                    "test/acc": test_m["accuracy"],
+                    "test/balanced_acc": test_m["balanced_accuracy"],
+                    "test/macro_f1": test_m["macro_f1"],
+                    "test/weighted_f1": test_m["weighted_f1"],
+                    "test/macro_precision": test_m["macro_precision"],
+                    "test/macro_recall": test_m["macro_recall"],
+                })
+                wandb.run.summary["test_macro_f1"] = test_m["macro_f1"]
+                wandb.run.summary["test_balanced_accuracy"] = test_m["balanced_accuracy"]
+                wandb.run.summary["test_weighted_f1"] = test_m["weighted_f1"]
+                _log_wandb_confusion_matrix(
+                    "test/confusion_matrix",
+                    test_labels,
+                    test_preds,
+                    test_m["cm_labels"],
+                )
+                _log_wandb_per_class_table(
+                    "test/per_class_metrics",
+                    test_m["per_class"],
+                )
+
+            fold_summaries.append(_make_fold_summary(best_val_snapshot, test_snapshot))
 
         wandb.finish()
 
