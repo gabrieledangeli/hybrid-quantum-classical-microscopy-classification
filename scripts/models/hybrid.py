@@ -714,8 +714,9 @@ class _ResNetFeatureExtractor(nn.Module):
         pretrained: When ``True``, load either *weights_path* or ImageNet
             torchvision weights. When ``False``, the backbone is randomly
             initialised.
-        freeze: When ``True``, freeze every parameter except ``layer4`` (the
-            final residual stage), enabling efficient fine-tuning.
+        freeze_mode: ``none`` trains the full ResNet extractor, ``partial``
+            freezes everything except ``layer4``, and ``full`` freezes the
+            complete ResNet extractor.
     """
 
     def __init__(
@@ -723,7 +724,7 @@ class _ResNetFeatureExtractor(nn.Module):
         backbone: str = "resnet18",
         weights_path: Optional[str] = None,
         pretrained: bool = True,
-        freeze: bool = True,
+        freeze_mode: str = "none",
     ) -> None:
         super().__init__()
         backbone = backbone.lower().strip()
@@ -731,6 +732,10 @@ class _ResNetFeatureExtractor(nn.Module):
             raise ValueError(f"Unknown backbone '{backbone}'. Choose from {list(_FEAT_DIM)}.")
         if weights_path and not pretrained:
             raise ValueError("weights_path requires pretrained=True.")
+        if freeze_mode != "none" and not pretrained:
+            raise ValueError(
+                "ResNet freeze modes partial/full require pretrained=True."
+            )
         self.feature_dim = _FEAT_DIM[backbone]
 
         build_fn, default_w = _RESNET_REGISTRY[backbone]
@@ -751,11 +756,12 @@ class _ResNetFeatureExtractor(nn.Module):
 
         self.backbone = nn.Sequential(*list(m.children())[:-1])
 
-        if freeze:
+        if freeze_mode in ("partial", "full"):
             for p in self.backbone.parameters():
                 p.requires_grad = False
-            for p in m.layer4.parameters():
-                p.requires_grad = True
+            if freeze_mode == "partial":
+                for p in m.layer4.parameters():
+                    p.requires_grad = True
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.backbone(x).flatten(1)
@@ -780,7 +786,7 @@ class HybridTNClassifier(nn.Module):
         vqc_layers: int = 2,
         vqc_readout: str = "z+zz",
         vqc_dropout: float = 0.0,
-        freeze_resnet: bool = False,
+        resnet_freeze_mode: str = "none",
         bridge_type: str = "mps",
         backbone: str = "resnet18",
         backbone_weights: Optional[str] = None,
@@ -819,7 +825,7 @@ class HybridTNClassifier(nn.Module):
             backbone=backbone,
             weights_path=backbone_weights,
             pretrained=pretrained,
-            freeze=freeze_resnet,
+            freeze_mode=resnet_freeze_mode,
         )
         feat_dim = self.resnet.feature_dim
 
@@ -891,7 +897,7 @@ class SimpleHybridVQCClassifier(nn.Module):
         vqc_layers: int = 2,
         vqc_readout: str = "z+zz",
         vqc_dropout: float = 0.0,
-        freeze_resnet: bool = False,
+        resnet_freeze_mode: str = "none",
         backbone: str = "resnet18",
         backbone_weights: Optional[str] = None,
         pretrained: bool = True,
@@ -907,7 +913,7 @@ class SimpleHybridVQCClassifier(nn.Module):
             backbone=backbone,
             weights_path=backbone_weights,
             pretrained=pretrained,
-            freeze=freeze_resnet,
+            freeze_mode=resnet_freeze_mode,
         )
         feat_dim = self.resnet.feature_dim
 
@@ -940,7 +946,7 @@ def hybrid_tn_model(
     vqc_layers: int = 2,
     vqc_readout: str = "z+zz",
     vqc_dropout: float = 0.0,
-    freeze_resnet: bool = False,
+    resnet_freeze_mode: str = "none",
     tn_bridge: str = "mps",
     backbone: str = "resnet18",
     backbone_weights: Optional[str] = None,
@@ -957,7 +963,7 @@ def hybrid_tn_model(
         vqc_layers=vqc_layers,
         vqc_readout=vqc_readout,
         vqc_dropout=vqc_dropout,
-        freeze_resnet=freeze_resnet,
+        resnet_freeze_mode=resnet_freeze_mode,
         bridge_type=tn_bridge,
         backbone=backbone,
         backbone_weights=backbone_weights,
@@ -972,7 +978,7 @@ def hybrid_vqc_model(
     vqc_layers: int = 2,
     vqc_readout: str = "z+zz",
     vqc_dropout: float = 0.0,
-    freeze_resnet: bool = False,
+    resnet_freeze_mode: str = "none",
     backbone: str = "resnet18",
     backbone_weights: Optional[str] = None,
     pretrained: bool = True,
@@ -984,7 +990,7 @@ def hybrid_vqc_model(
         vqc_layers=vqc_layers,
         vqc_readout=vqc_readout,
         vqc_dropout=vqc_dropout,
-        freeze_resnet=freeze_resnet,
+        resnet_freeze_mode=resnet_freeze_mode,
         backbone=backbone,
         backbone_weights=backbone_weights,
         pretrained=pretrained,

@@ -140,10 +140,12 @@ def parse_args() -> argparse.Namespace:
     cl.add_argument("--classifier_pretrained", action="store_true",
                     help="Use pretrained ResNet backbone weights. If --backbone_weights "
                          "is omitted, torchvision ImageNet weights are used.")
-    cl.add_argument("--freeze_resnet_backbone", action="store_true",
-                    help="Freeze ResNet stem + layer1-3. For pure ResNet, layer4 + fc "
-                         "stay trainable; for hybrid models, only layer4 stays trainable "
-                         "because the classifier head lives downstream.")
+    cl.add_argument("--resnet_freeze_mode", type=str, default="none",
+                    choices=["none", "partial", "full"],
+                    help="How much of a pretrained ResNet backbone to freeze. "
+                         "'none' trains the full network, "
+                         "'partial' freezes stem + layer1-3 while leaving layer4 trainable, "
+                         "'full' freezes the entire ResNet backbone.")
     cl.add_argument("--backbone", type=str, default="resnet18",
                     choices=["resnet18", "resnet34", "resnet50"],
                     help="ResNet backbone for the hybrid model.")
@@ -202,6 +204,9 @@ def parse_args() -> argparse.Namespace:
                     help="Enable wandb.watch() gradient tracking.")
 
     args = parser.parse_args()
+    if args.resnet_freeze_mode != "none" and not args.classifier_pretrained:
+        parser.error("--resnet_freeze_mode partial or full requires --classifier_pretrained.")
+
     if args.backbone_weights and not args.classifier_pretrained:
         parser.error("--backbone_weights requires --classifier_pretrained.")
     if args.save_backbone and args.classifier_network not in ("resnet18", "resnet34", "resnet50"):

@@ -178,7 +178,7 @@ def _build_classifier(args, n_classes: int):
             vqc_layers=args.vqc_layers,
             vqc_readout=args.vqc_readout,
             vqc_dropout=args.vqc_dropout,
-            freeze_resnet=args.freeze_resnet_backbone,
+            resnet_freeze_mode=args.resnet_freeze_mode,
             backbone=args.backbone,
             backbone_weights=args.backbone_weights,
             pretrained=args.classifier_pretrained,
@@ -190,7 +190,7 @@ def _build_classifier(args, n_classes: int):
             vqc_layers=args.vqc_layers,
             vqc_readout=args.vqc_readout,
             vqc_dropout=args.vqc_dropout,
-            freeze_resnet=args.freeze_resnet_backbone,
+            resnet_freeze_mode=args.resnet_freeze_mode,
             backbone=args.backbone,
             backbone_weights=args.backbone_weights,
             pretrained=args.classifier_pretrained,
@@ -200,8 +200,8 @@ def _build_classifier(args, n_classes: int):
             fc_out_features=n_classes,
             model_name=args.classifier_network,
             pretrained=args.classifier_pretrained,
-            freeze_backbone=args.freeze_resnet_backbone,
             backbone_weights=args.backbone_weights,
+            resnet_freeze_mode=args.resnet_freeze_mode,
         )
     else:
         raise ValueError(f"Unsupported classifier network: {args.classifier_network}.")
