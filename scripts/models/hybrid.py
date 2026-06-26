@@ -568,10 +568,12 @@ class TTNBridge(nn.Module):
 class VariationalQuantumLayer(nn.Module):
     """Variational quantum circuit with data re-uploading and configurable read-out.
 
-    Each of the ``n_layers`` blocks: (1) re-uploads the inputs via
+    Each of the ``n_layers`` blocks: (1) uploads inputs via
     ``RX(freq * inputs)`` with trainable per-(layer, qubit) ``freqs`` -- which
     widen the model's accessible Fourier spectrum -- then (2) applies the
-    ``RX/RY/RZ`` variational rotations and (3) a ring of CNOTs.
+    ``RX/RY/RZ`` variational rotations and (3) a ring of CNOTs. Inputs may be
+    shared across layers as ``(..., n_qubits)`` or supplied per layer as a
+    flattened ``(..., n_layers * n_qubits)`` vector.
 
     The read-out is selected by ``readout``:
 
@@ -667,7 +669,8 @@ class VariationalQuantumLayer(nn.Module):
             for layer in range(n_layers):
                 # Data re-uploading with trainable frequencies.
                 for i in range(n_qubits):
-                    qml.RX(freqs[layer, i] * inputs[..., i], wires=i)
+                    angle = inputs[..., layer * n_qubits + i] if inputs.shape[-1] != n_qubits else inputs[..., i]
+                    qml.RX(freqs[layer, i] * angle, wires=i)
                 # Variational rotations.
                 for i in range(n_qubits):
                     qml.RX(weights[layer, i, 0], wires=i)
@@ -696,6 +699,11 @@ class VariationalQuantumLayer(nn.Module):
             nn.init.normal_(self.qlayer.weights, mean=0.0, std=0.1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if x.shape[-1] not in (self.n_qubits, self.n_layers * self.n_qubits):
+            raise ValueError(
+                f"Expected last input dimension {self.n_qubits} or "
+                f"{self.n_layers * self.n_qubits}, got {x.shape[-1]}."
+            )
         return self.qlayer(x)
 
 
@@ -879,13 +887,18 @@ class HybridTNClassifier(nn.Module):
         return self.q_proj(q_out)
 
 
+_VQC_ANGLE_HIDDEN_DIM = 256
+_VQC_ANGLE_DROPOUT = 0.2
+
+
 class SimpleHybridVQCClassifier(nn.Module):
-    """ResNet -> linear angle map -> VQC -> BN -> linear.
+    """ResNet -> MLP angle map -> VQC -> BN -> linear.
 
     Minimal hybrid baseline without a tensor-network bridge. The
-    ResNet feature vector is normalised, projected directly to ``n_qubits``
-    angles, bounded with ``tanh``, and passed to the same VQC used by
-    ``HybridTNClassifier``.
+    ResNet feature vector is normalised, projected to one ``n_qubits`` angle
+    block per VQC layer, bounded with ``tanh``, and passed to the same VQC used by
+    ``HybridTNClassifier``. The small adapter MLP before the quantum
+    bottleneck is intentionally fixed while this variant is being evaluated.
 
     Input:  ``(B, 3, H, W)``  Output: ``(B, n_classes)``
     """
@@ -918,7 +931,12 @@ class SimpleHybridVQCClassifier(nn.Module):
         feat_dim = self.resnet.feature_dim
 
         self.feature_norm = nn.LayerNorm(feat_dim)
-        self.angle_map = nn.Linear(feat_dim, n_qubits)
+        self.angle_map = nn.Sequential(
+            nn.Linear(feat_dim, _VQC_ANGLE_HIDDEN_DIM),
+            nn.GELU(),
+            nn.Dropout(p=_VQC_ANGLE_DROPOUT),
+            nn.Linear(_VQC_ANGLE_HIDDEN_DIM, vqc_layers * n_qubits),
+        )
         self.quantum = VariationalQuantumLayer(n_qubits, vqc_layers, readout=vqc_readout)
 
         readout_dim = self.quantum.readout_dim
