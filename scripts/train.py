@@ -51,6 +51,11 @@ from processing.torch_pipeline import (
 )
 from utils.metrics import compute_metrics
 
+# Keep every W&B run cache in a single <project_root>/wandb folder
+os.environ.setdefault(
+    "WANDB_DIR", os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+)
+
 # -- Device ----------------------------------------------------------------
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")

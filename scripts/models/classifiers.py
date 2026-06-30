@@ -93,7 +93,8 @@ def resnet_model(
 
     ``resnet_freeze_mode`` controls fine-tuning: ``none`` trains the full
     network, ``partial`` freezes stem/layer1-3 while keeping ``layer4`` and ``fc`` head
-    trainable, and ``full`` freezes the complete ResNet backbone.
+    trainable, ``layer34`` freezes stem/layer1-2 while keeping ``layer3``, ``layer4``
+    and ``fc`` trainable, and ``full`` freezes the complete ResNet backbone.
 
     Note: this differs from the hybrid model's ``_ResNetFeatureExtractor``,
     which has no FC head (the head lives downstream as TN bridge + VQC).
@@ -120,11 +121,14 @@ def resnet_model(
         print(f"[Backbone] ImageNet-pretrained {model_name}")
     model.fc = nn.Linear(model.fc.in_features, fc_out_features, bias=True)
 
-    if resnet_freeze_mode in ("partial", "full"):
+    if resnet_freeze_mode in ("partial", "layer34", "full"):
         for p in model.parameters():
             p.requires_grad = False
-        if resnet_freeze_mode == "partial":
+        if resnet_freeze_mode in ("partial", "layer34"):
             for p in model.layer4.parameters():
+                p.requires_grad = True
+        if resnet_freeze_mode == "layer34":
+            for p in model.layer3.parameters():
                 p.requires_grad = True
         for p in model.fc.parameters():
             p.requires_grad = True

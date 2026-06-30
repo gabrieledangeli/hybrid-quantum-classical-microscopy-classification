@@ -141,10 +141,11 @@ def parse_args() -> argparse.Namespace:
                     help="Use pretrained ResNet backbone weights. If --backbone_weights "
                          "is omitted, torchvision ImageNet weights are used.")
     cl.add_argument("--resnet_freeze_mode", type=str, default="none",
-                    choices=["none", "partial", "full"],
+                    choices=["none", "partial", "layer34", "full"],
                     help="How much of a pretrained ResNet backbone to freeze. "
                          "'none' trains the full network, "
                          "'partial' freezes stem + layer1-3 while leaving layer4 trainable, "
+                         "'layer34' freezes stem + layer1-2 while leaving layer3 + layer4 trainable, "
                          "'full' freezes the entire ResNet backbone.")
     cl.add_argument("--backbone", type=str, default="resnet18",
                     choices=["resnet18", "resnet34", "resnet50"],
