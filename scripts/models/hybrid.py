@@ -568,10 +568,17 @@ class TTNBridge(nn.Module):
 class VariationalQuantumLayer(nn.Module):
     """Variational quantum circuit with data re-uploading and configurable read-out.
 
-    Each of the ``n_layers`` blocks: (1) re-uploads the inputs via
-    ``RX(freq * inputs)`` with trainable per-(layer, qubit) ``freqs`` -- which
-    widen the model's accessible Fourier spectrum -- then (2) applies the
-    ``RX/RY/RZ`` variational rotations and (3) a ring of CNOTs.
+    Each of the ``n_layers`` blocks: 
+    (1) re-uploads three features per qubit with trainable per-(layer, qubit, axis) 
+    ``thetas`` and ``feature_weights`` as 
+    ``RX(theta0 + w0*x0) RZ(theta1 + w1*x1) RY(theta2 + w2*x2)``,
+    
+    (2) applies a ring of CNOTs. 
+    
+    The preferred input shape is ``(..., 3 * n_qubits)``. 
+    
+    ``(..., n_qubits)`` is also accepted as a compatibility path and repeats each 
+    scalar across the three rotation axes.
 
     The read-out is selected by ``readout``:
 
@@ -663,16 +670,33 @@ class VariationalQuantumLayer(nn.Module):
             return _pauli_product(term)
 
         @qml.qnode(dev, interface="torch", diff_method=diff)
-        def circuit(inputs, weights, freqs):
+        def circuit(inputs, thetas, feature_weights):
+            if inputs.shape[-1] == 3 * n_qubits:
+                features = inputs.reshape(*inputs.shape[:-1], n_qubits, 3)
+            elif inputs.shape[-1] == n_qubits:
+                features = inputs.unsqueeze(-1).expand(*inputs.shape, 3)
+            else:
+                raise ValueError(
+                    f"Expected last input dimension {3 * n_qubits} or "
+                    f"{n_qubits}, got {inputs.shape[-1]}."
+                )
+
             for layer in range(n_layers):
-                # Data re-uploading with trainable frequencies.
+                # Data re-uploading with trainable per-layer encoding weights.
                 for i in range(n_qubits):
-                    qml.RX(freqs[layer, i] * inputs[..., i], wires=i)
-                # Variational rotations.
-                for i in range(n_qubits):
-                    qml.RX(weights[layer, i, 0], wires=i)
-                    qml.RY(weights[layer, i, 1], wires=i)
-                    qml.RZ(weights[layer, i, 2], wires=i)
+                    qml.RX(
+                        thetas[layer, i, 0] + feature_weights[layer, i, 0] * features[..., i, 0],
+                        wires=i,
+                    )
+                    qml.RZ(
+                        thetas[layer, i, 1] + feature_weights[layer, i, 1] * features[..., i, 1],
+                        wires=i,
+                    )
+                    qml.RY(
+                        thetas[layer, i, 2] + feature_weights[layer, i, 2] * features[..., i, 2],
+                        wires=i,
+                    )
+                
                 # Ring entanglement.
                 if n_qubits > 1:
                     for i in range(n_qubits - 1):
@@ -682,20 +706,25 @@ class VariationalQuantumLayer(nn.Module):
             return [qml.expval(_observable(t)) for t in spec]
 
         weight_shapes = {
-            "weights": (n_layers, n_qubits, 3),
-            "freqs": (n_layers, n_qubits),
+            "thetas": (n_layers, n_qubits, 3),
+            "feature_weights": (n_layers, n_qubits, 3),
         }
         self.qlayer = qml.qnn.TorchLayer(circuit, weight_shapes)
-        # Start re-uploading at unit frequency so the initial encoding scale
-        # matches the (separately learnable) ``angle_scale`` in the classifier.
+        # Start re-uploading at unit feature weights so the initial encoding
+        # scale matches the separately learnable ``angle_scale`` in the classifier.
         # Small-angle variational init keeps the circuit near the identity,
         # avoiding the flat (barren-plateau-prone) regions reached by the
         # TorchLayer default U(0, 2*pi) init.
         with torch.no_grad():
-            self.qlayer.freqs.fill_(1.0)
-            nn.init.normal_(self.qlayer.weights, mean=0.0, std=0.1)
+            self.qlayer.feature_weights.fill_(1.0)
+            nn.init.normal_(self.qlayer.thetas, mean=0.0, std=0.1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if x.shape[-1] not in (self.n_qubits, 3 * self.n_qubits):
+            raise ValueError(
+                f"Expected last input dimension {self.n_qubits} or "
+                f"{3 * self.n_qubits}, got {x.shape[-1]}."
+            )
         return self.qlayer(x)
 
 
@@ -714,8 +743,10 @@ class _ResNetFeatureExtractor(nn.Module):
         pretrained: When ``True``, load either *weights_path* or ImageNet
             torchvision weights. When ``False``, the backbone is randomly
             initialised.
-        freeze: When ``True``, freeze every parameter except ``layer4`` (the
-            final residual stage), enabling efficient fine-tuning.
+        freeze_mode: ``none`` trains the full ResNet extractor, ``partial``
+            freezes everything except ``layer4``, ``layer34`` freezes everything
+            except ``layer3`` + ``layer4``, and ``full`` freezes the complete
+            ResNet extractor.
     """
 
     def __init__(
@@ -723,7 +754,7 @@ class _ResNetFeatureExtractor(nn.Module):
         backbone: str = "resnet18",
         weights_path: Optional[str] = None,
         pretrained: bool = True,
-        freeze: bool = True,
+        freeze_mode: str = "none",
     ) -> None:
         super().__init__()
         backbone = backbone.lower().strip()
@@ -731,6 +762,10 @@ class _ResNetFeatureExtractor(nn.Module):
             raise ValueError(f"Unknown backbone '{backbone}'. Choose from {list(_FEAT_DIM)}.")
         if weights_path and not pretrained:
             raise ValueError("weights_path requires pretrained=True.")
+        if freeze_mode != "none" and not pretrained:
+            raise ValueError(
+                "ResNet freeze modes partial/full require pretrained=True."
+            )
         self.feature_dim = _FEAT_DIM[backbone]
 
         build_fn, default_w = _RESNET_REGISTRY[backbone]
@@ -751,11 +786,15 @@ class _ResNetFeatureExtractor(nn.Module):
 
         self.backbone = nn.Sequential(*list(m.children())[:-1])
 
-        if freeze:
+        if freeze_mode in ("partial", "layer34", "full"):
             for p in self.backbone.parameters():
                 p.requires_grad = False
-            for p in m.layer4.parameters():
-                p.requires_grad = True
+            if freeze_mode in ("partial", "layer34"):
+                for p in m.layer4.parameters():
+                    p.requires_grad = True
+            if freeze_mode == "layer34":
+                for p in m.layer3.parameters():
+                    p.requires_grad = True
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.backbone(x).flatten(1)
@@ -780,7 +819,7 @@ class HybridTNClassifier(nn.Module):
         vqc_layers: int = 2,
         vqc_readout: str = "z+zz",
         vqc_dropout: float = 0.0,
-        freeze_resnet: bool = False,
+        resnet_freeze_mode: str = "none",
         bridge_type: str = "mps",
         backbone: str = "resnet18",
         backbone_weights: Optional[str] = None,
@@ -819,7 +858,7 @@ class HybridTNClassifier(nn.Module):
             backbone=backbone,
             weights_path=backbone_weights,
             pretrained=pretrained,
-            freeze=freeze_resnet,
+            freeze_mode=resnet_freeze_mode,
         )
         feat_dim = self.resnet.feature_dim
 
@@ -869,17 +908,27 @@ class HybridTNClassifier(nn.Module):
     def forward(self, images: torch.Tensor) -> torch.Tensor:
         feats = self.resnet(images)
         q_in = self.tn_bridge(feats) * self.angle_scale
-        q_out = self.q_dropout(self.q_norm(self.quantum(q_in)))
+        q_raw = self.quantum(q_in)
+        if q_raw.device != q_in.device:
+            q_raw = q_raw.to(q_in.device)
+        q_out = self.q_dropout(self.q_norm(q_raw))
         return self.q_proj(q_out)
 
 
+_VQC_ANGLE_HIDDEN_DIM = 256
+_VQC_ANGLE_DROPOUT = 0.2
+
+
 class SimpleHybridVQCClassifier(nn.Module):
-    """ResNet -> linear angle map -> VQC -> BN -> linear.
+    """ResNet -> MLP angle map -> VQC -> BN -> linear.
 
     Minimal hybrid baseline without a tensor-network bridge. The
-    ResNet feature vector is normalised, projected directly to ``n_qubits``
-    angles, bounded with ``tanh``, and passed to the same VQC used by
-    ``HybridTNClassifier``.
+    ResNet feature vector is normalised, projected to three input features per
+    qubit, bounded with ``tanh``, and passed to the same VQC used by
+    ``HybridTNClassifier``. Each VQC layer then re-uploads the same per-qubit
+    feature triplet with independent trainable encoding weights and offsets.
+    The small adapter MLP before the quantum bottleneck is intentionally fixed
+    while this variant is being evaluated.
 
     Input:  ``(B, 3, H, W)``  Output: ``(B, n_classes)``
     """
@@ -891,7 +940,7 @@ class SimpleHybridVQCClassifier(nn.Module):
         vqc_layers: int = 2,
         vqc_readout: str = "z+zz",
         vqc_dropout: float = 0.0,
-        freeze_resnet: bool = False,
+        resnet_freeze_mode: str = "none",
         backbone: str = "resnet18",
         backbone_weights: Optional[str] = None,
         pretrained: bool = True,
@@ -907,12 +956,17 @@ class SimpleHybridVQCClassifier(nn.Module):
             backbone=backbone,
             weights_path=backbone_weights,
             pretrained=pretrained,
-            freeze=freeze_resnet,
+            freeze_mode=resnet_freeze_mode,
         )
         feat_dim = self.resnet.feature_dim
 
         self.feature_norm = nn.LayerNorm(feat_dim)
-        self.angle_map = nn.Linear(feat_dim, n_qubits)
+        self.angle_map = nn.Sequential(
+            nn.Linear(feat_dim, _VQC_ANGLE_HIDDEN_DIM),
+            nn.GELU(),
+            nn.Dropout(p=_VQC_ANGLE_DROPOUT),
+            nn.Linear(_VQC_ANGLE_HIDDEN_DIM, 3 * n_qubits),
+        )
         self.quantum = VariationalQuantumLayer(n_qubits, vqc_layers, readout=vqc_readout)
 
         readout_dim = self.quantum.readout_dim
@@ -924,7 +978,10 @@ class SimpleHybridVQCClassifier(nn.Module):
     def forward(self, images: torch.Tensor) -> torch.Tensor:
         feats = self.feature_norm(self.resnet(images))
         q_in = torch.tanh(self.angle_map(feats)) * self.angle_scale
-        q_out = self.q_dropout(self.q_norm(self.quantum(q_in)))
+        q_raw = self.quantum(q_in)
+        if q_raw.device != q_in.device:
+            q_raw = q_raw.to(q_in.device)
+        q_out = self.q_dropout(self.q_norm(q_raw))
         return self.q_proj(q_out)
 
 
@@ -940,7 +997,7 @@ def hybrid_tn_model(
     vqc_layers: int = 2,
     vqc_readout: str = "z+zz",
     vqc_dropout: float = 0.0,
-    freeze_resnet: bool = False,
+    resnet_freeze_mode: str = "none",
     tn_bridge: str = "mps",
     backbone: str = "resnet18",
     backbone_weights: Optional[str] = None,
@@ -957,7 +1014,7 @@ def hybrid_tn_model(
         vqc_layers=vqc_layers,
         vqc_readout=vqc_readout,
         vqc_dropout=vqc_dropout,
-        freeze_resnet=freeze_resnet,
+        resnet_freeze_mode=resnet_freeze_mode,
         bridge_type=tn_bridge,
         backbone=backbone,
         backbone_weights=backbone_weights,
@@ -972,7 +1029,7 @@ def hybrid_vqc_model(
     vqc_layers: int = 2,
     vqc_readout: str = "z+zz",
     vqc_dropout: float = 0.0,
-    freeze_resnet: bool = False,
+    resnet_freeze_mode: str = "none",
     backbone: str = "resnet18",
     backbone_weights: Optional[str] = None,
     pretrained: bool = True,
@@ -984,7 +1041,7 @@ def hybrid_vqc_model(
         vqc_layers=vqc_layers,
         vqc_readout=vqc_readout,
         vqc_dropout=vqc_dropout,
-        freeze_resnet=freeze_resnet,
+        resnet_freeze_mode=resnet_freeze_mode,
         backbone=backbone,
         backbone_weights=backbone_weights,
         pretrained=pretrained,

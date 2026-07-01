@@ -81,8 +81,8 @@ def resnet_model(
     fc_out_features: int,
     model_name: str = "resnet18",
     pretrained: bool = True,
-    freeze_backbone: bool = False,
     backbone_weights: Optional[str] = None,
+    resnet_freeze_mode: str = "none",
 ) -> ResNet:
     """Build a ResNet with a replaced final FC layer.
 
@@ -91,23 +91,22 @@ def resnet_model(
     source; otherwise torchvision ImageNet weights are used. The final ``fc``
     layer is always freshly initialised for the requested label space.
 
-    When *freeze_backbone* is ``True``, only ``layer4`` (the last residual
-    stage) and the freshly-initialised ``fc`` head are trainable; everything
-    else (stem, layer1-3) is frozen for efficient fine-tuning.
+    ``resnet_freeze_mode`` controls fine-tuning: ``none`` trains the full
+    network, ``partial`` freezes stem/layer1-3 while keeping ``layer4`` and ``fc`` head
+    trainable, ``layer34`` freezes stem/layer1-2 while keeping ``layer3``, ``layer4``
+    and ``fc`` trainable, and ``full`` freezes the complete ResNet backbone.
 
     Note: this differs from the hybrid model's ``_ResNetFeatureExtractor``,
-    which has no FC head (the head lives downstream as TN bridge + VQC), so
-    ``freeze=True`` there leaves only ``layer4`` trainable.
+    which has no FC head (the head lives downstream as TN bridge + VQC).
     """
     model_name = model_name.lower().strip()
     if model_name not in _RESNET_REGISTRY:
         raise ValueError(f"Unknown model: '{model_name}'. Choose from {list(_RESNET_REGISTRY)}.")
     if backbone_weights and not pretrained:
         raise ValueError("backbone_weights requires pretrained=True.")
-    if freeze_backbone and not pretrained:
+    if resnet_freeze_mode != "none" and not pretrained:
         raise ValueError(
-            "freeze_backbone=True requires pretrained=True; "
-            "otherwise stem/layer1-3 would remain randomly initialized and frozen."
+            "resnet_freeze_mode partial/full requires pretrained=True."
         )
 
     build_fn, default_weights = _RESNET_REGISTRY[model_name]
@@ -122,11 +121,15 @@ def resnet_model(
         print(f"[Backbone] ImageNet-pretrained {model_name}")
     model.fc = nn.Linear(model.fc.in_features, fc_out_features, bias=True)
 
-    if freeze_backbone:
+    if resnet_freeze_mode in ("partial", "layer34", "full"):
         for p in model.parameters():
             p.requires_grad = False
-        for p in model.layer4.parameters():
-            p.requires_grad = True
+        if resnet_freeze_mode in ("partial", "layer34"):
+            for p in model.layer4.parameters():
+                p.requires_grad = True
+        if resnet_freeze_mode == "layer34":
+            for p in model.layer3.parameters():
+                p.requires_grad = True
         for p in model.fc.parameters():
             p.requires_grad = True
 
