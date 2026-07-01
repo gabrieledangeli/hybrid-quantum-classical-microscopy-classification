@@ -447,15 +447,38 @@ def _log_wandb_cv_summary(
     args: argparse.Namespace,
     base_run_name: str,
     fold_summaries: List[Dict[str, Any]],
+    oof_labels: Optional[List[np.ndarray]] = None,
+    oof_preds: Optional[List[np.ndarray]] = None,
+    oof_class_names: Optional[List[str]] = None,
 ) -> None:
-    """Log a cross-validation summary run with per-fold metrics and mean/std."""
+    """Log a cross-validation summary run.
+
+    For ``kfold`` CV (disjoint folds) validation metrics are reported as a single
+    *pooled out-of-fold* score: the best-epoch predictions of every fold are
+    concatenated (each sample is validated exactly once) and one metric is
+    computed over the whole dataset.
+    
+    For other strategies the per-fold mean/std is kept.
+    """
     if not fold_summaries:
         return
+
+    # Pooled out-of-fold metrics are only possible with disjoint folds (kfold)
+    pooled = (
+        getattr(args, "cv_strategy", None) == "kfold"
+        and oof_labels is not None
+        and len(oof_labels) > 0
+    )
 
     config = vars(args).copy()
     config["base_run_name"] = base_run_name
     config["folds_completed"] = len(fold_summaries)
-    config["summary_scope"] = "best_validation_epoch_per_fold"
+    # If pooled, the summary metrics are computed on the concatenated best-epoch
+    # predictions of every fold. Otherwise, the summary metrics are the mean/std
+    # of the best-epoch metrics of every fold.
+    config["summary_scope"] = (
+        "pooled_out_of_fold" if pooled else "best_validation_epoch_per_fold"
+    )
 
     wandb.init(
         project=args.wandb_project,
@@ -468,55 +491,7 @@ def _log_wandb_cv_summary(
 
     has_test = any("test_accuracy" in row for row in fold_summaries)
 
-    columns = [
-        "Fold",
-        "Best Epoch",
-        "Best Val Loss",
-        "Best Val Accuracy",
-        "Best Val Balanced Accuracy",
-        "Best Val Macro F1",
-        "Best Val Weighted F1",
-        "Best Val Macro Precision",
-        "Best Val Macro Recall",
-    ]
-    if has_test:
-        columns.extend([
-            "Test Loss",
-            "Test Accuracy",
-            "Test Balanced Accuracy",
-            "Test Macro F1",
-            "Test Weighted F1",
-            "Test Macro Precision",
-            "Test Macro Recall",
-        ])
-    table = wandb.Table(columns=columns)
-    for row in fold_summaries:
-        values = [
-            row["fold"],
-            row["best_epoch"],
-            row["val_loss"],
-            row["val_accuracy"],
-            row["val_balanced_accuracy"],
-            row["val_macro_f1"],
-            row["val_weighted_f1"],
-            row["val_macro_precision"],
-            row["val_macro_recall"],
-        ]
-        if has_test:
-            values.extend([
-                row.get("test_loss"),
-                row.get("test_accuracy"),
-                row.get("test_balanced_accuracy"),
-                row.get("test_macro_f1"),
-                row.get("test_weighted_f1"),
-                row.get("test_macro_precision"),
-                row.get("test_macro_recall"),
-            ])
-        table.add_data(*values)
-
-    wandb.log({"cv/fold_best_validation_metrics": table})
-
-    metric_keys = [
+    val_metric_keys = [
         ("val_loss", "best_val_loss"),
         ("val_accuracy", "best_val_accuracy"),
         ("val_balanced_accuracy", "best_val_balanced_accuracy"),
@@ -525,25 +500,57 @@ def _log_wandb_cv_summary(
         ("val_macro_precision", "best_val_macro_precision"),
         ("val_macro_recall", "best_val_macro_recall"),
     ]
-    if has_test:
-        metric_keys.extend([
-            ("test_loss", "test_loss"),
-            ("test_accuracy", "test_accuracy"),
-            ("test_balanced_accuracy", "test_balanced_accuracy"),
-            ("test_macro_f1", "test_macro_f1"),
-            ("test_weighted_f1", "test_weighted_f1"),
-            ("test_macro_precision", "test_macro_precision"),
-            ("test_macro_recall", "test_macro_recall"),
-        ])
-    aggregate = {}
-    std_ddof = 1 if len(fold_summaries) > 1 else 0
-    for key, summary_key in metric_keys:
-        values = np.asarray([row[key] for row in fold_summaries], dtype=float)
-        aggregate[f"cv/{summary_key}_mean"] = float(values.mean())
-        aggregate[f"cv/{summary_key}_std"] = float(values.std(ddof=std_ddof))
+    test_metric_keys = [
+        ("test_loss", "test_loss"),
+        ("test_accuracy", "test_accuracy"),
+        ("test_balanced_accuracy", "test_balanced_accuracy"),
+        ("test_macro_f1", "test_macro_f1"),
+        ("test_weighted_f1", "test_weighted_f1"),
+        ("test_macro_precision", "test_macro_precision"),
+        ("test_macro_recall", "test_macro_recall"),
+    ]
 
-    aggregate["cv/n_folds"] = len(fold_summaries)
-    aggregate["cv/std_ddof"] = std_ddof
+    aggregate = {"cv/n_folds": len(fold_summaries)}
+
+    if pooled:
+        # Disjoint folds means one prediction per sample, therfore a single pooled score
+        # Concatenate the per-fold best-epoch predictions.
+        labels = np.concatenate(oof_labels)
+        preds = np.concatenate(oof_preds)
+        pm = compute_metrics(preds, labels, oof_class_names)
+        aggregate.update({
+            "cv/pooled_accuracy": float(pm["accuracy"]),
+            "cv/pooled_balanced_accuracy": float(pm["balanced_accuracy"]),
+            "cv/pooled_macro_f1": float(pm["macro_f1"]),
+            "cv/pooled_weighted_f1": float(pm["weighted_f1"]),
+            "cv/pooled_macro_precision": float(pm["macro_precision"]),
+            "cv/pooled_macro_recall": float(pm["macro_recall"]),
+            "cv/n_pooled_samples": int(len(labels)),
+        })
+        _log_wandb_confusion_matrix(
+            "cv/pooled_confusion_matrix", labels, preds, pm["cm_labels"],
+        )
+        _log_wandb_per_class_table("cv/pooled_per_class_metrics", pm["per_class"])
+    else:
+        std_ddof = 1 if len(fold_summaries) > 1 else 0
+        aggregate["cv/std_ddof"] = std_ddof
+        for key, summary_key in val_metric_keys:
+            values = np.asarray([row[key] for row in fold_summaries], dtype=float)
+            aggregate[f"cv/{summary_key}_mean"] = float(values.mean())
+            aggregate[f"cv/{summary_key}_std"] = float(values.std(ddof=std_ddof))
+
+    # A fixed test holdout is shared across folds and cannot be pooled, so it is
+    # always summarised as mean/std when present.
+    if has_test:
+        std_ddof = 1 if len(fold_summaries) > 1 else 0
+        for key, summary_key in test_metric_keys:
+            values = np.asarray(
+                [row[key] for row in fold_summaries if key in row], dtype=float
+            )
+            if values.size:
+                aggregate[f"cv/{summary_key}_mean"] = float(values.mean())
+                aggregate[f"cv/{summary_key}_std"] = float(values.std(ddof=std_ddof))
+
     # Aggregates are scalars, not a time-series: store them only in the run
     # summary instead of also logging single-point metrics.
     for key, value in aggregate.items():
@@ -636,6 +643,9 @@ def run_train(args: argparse.Namespace) -> None:
         indices=train_val_pool_idx,
     )
     fold_summaries = []
+    oof_labels = []
+    oof_preds = []
+    oof_class_names = None
 
     for fold, (train_idx, val_idx) in enumerate(splits):
         print(f"\n{'='*60}\n  Fold {fold + 1}/{args.n_splits}\n{'='*60}")
@@ -830,16 +840,6 @@ def run_train(args: argparse.Namespace) -> None:
             wandb.run.summary["best_val_macro_f1"] = best_val_snapshot["metrics"]["macro_f1"]
             wandb.run.summary["best_val_balanced_accuracy"] = best_val_snapshot["metrics"]["balanced_accuracy"]
             wandb.run.summary["best_val_weighted_f1"] = best_val_snapshot["metrics"]["weighted_f1"]
-            _log_wandb_confusion_matrix(
-                "val/best_confusion_matrix",
-                best_val_snapshot["labels"],
-                best_val_snapshot["preds"],
-                best_val_snapshot["metrics"]["cm_labels"],
-            )
-            _log_wandb_per_class_table(
-                "val/best_per_class_metrics",
-                best_val_snapshot["metrics"]["per_class"],
-            )
 
             if test_loader is not None and best_state_dict is not None:
                 model.load_state_dict(best_state_dict)
@@ -868,22 +868,19 @@ def run_train(args: argparse.Namespace) -> None:
                 wandb.run.summary["test_macro_f1"] = test_m["macro_f1"]
                 wandb.run.summary["test_balanced_accuracy"] = test_m["balanced_accuracy"]
                 wandb.run.summary["test_weighted_f1"] = test_m["weighted_f1"]
-                _log_wandb_confusion_matrix(
-                    "test/confusion_matrix",
-                    test_labels,
-                    test_preds,
-                    test_m["cm_labels"],
-                )
-                _log_wandb_per_class_table(
-                    "test/per_class_metrics",
-                    test_m["per_class"],
-                )
 
             fold_summaries.append(_make_fold_summary(best_val_snapshot, test_snapshot))
+            
+            # Accumulate best-epoch predictions for pooled out-of-fold metrics.
+            oof_labels.append(best_val_snapshot["labels"])
+            oof_preds.append(best_val_snapshot["preds"])
+            oof_class_names = best_val_snapshot["metrics"]["cm_labels"]
 
         wandb.finish()
 
-    _log_wandb_cv_summary(args, base_run_name, fold_summaries)
+    _log_wandb_cv_summary(
+        args, base_run_name, fold_summaries, oof_labels, oof_preds, oof_class_names
+    )
 
     print("\nAll folds completed.")
 
