@@ -28,7 +28,7 @@ import wandb
 # -- Local imports ---------------------------------------------------------
 from config import parse_args
 from data.augmentation import get_augmentation, set_global_seed
-from data.dataset import Subset, get_dataset
+from data.dataset import CachedEmbeddingDataset, Subset, get_dataset
 from data.utils import (
     compute_soft_undersampling_weights,
     format_class_counts,
@@ -41,7 +41,7 @@ from models.classifiers import (
     extract_resnet_backbone_state_dict,
     resnet_model,
 )
-from models.hybrid import hybrid_tn_model, hybrid_vqc_model
+from models.hybrid import hybrid_tn_model, hybrid_vqc_model, classical_dino_model, hybrid_dino_model, ClassicalDinoClassifier, load_dinobloom
 from models.losses import FocalLoss
 from processing.numpy_pipeline import RawProcessingPipeline
 from processing.torch_pipeline import (
@@ -135,10 +135,22 @@ def validate(
 # ===========================================================================
 #  Building blocks helpers
 # ===========================================================================
-
+def get_dinobloom_transform() -> T.Compose:
+    return T.Compose([
+        T.ToTensor(),                   # numpy (H,W,C) float32 → tensor (C,H,W); PIL also accepted
+        T.Resize((224, 224)),
+        T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+    ])
 
 def _build_processor(args, dataset):
-    """Return ``(processor, normalization)`` based on CLI flags."""
+    """Return ``(processor, normalization)`` based on CLI flags.
+    
+    For DinoBloom, transformation it baked into MLL23DinoBloomDataset already."""
+    
+    if args.classifier_network in ("classical_dino", "hybrid_dino"):
+        dataset.transform = get_dinobloom_transform()
+        return None, None
+    
     is_rgb = args.dataset in ("MicroscopyRGB", "MLL23") or getattr(dataset, "is_rgb", False)
 
     if is_rgb:
@@ -169,8 +181,100 @@ def _build_processor(args, dataset):
     return RawToRGB(reduce_size=True, out_channels=3), mosaic_norm
 
 
+def _load_or_extract_features(
+    args: argparse.Namespace,
+    dataset,
+    device: torch.device,
+) -> Optional[torch.Tensor]:
+    """Extract DinoBloom CLS-token embeddings for every image; return (N, D) CPU tensor.
+
+    Results are persisted to ``{data_dir}/.dino_feature_cache/dinobloom_{variant}.pt``
+    so that repeated runs (and all CV folds within one run) share the same
+    pre-computed features without re-running the ViT.
+
+    The cache is invalidated automatically when the ordered image-path list
+    changes (new images added, dataset root switched, etc.).  Delete the cache
+    file manually if you change the DinoBloom transform.
+
+    Returns ``None`` when the backbone is partially unfrozen (features would
+    change during training, making a static cache invalid).
+    """
+    if args.dino_unfreeze_blocks > 0:
+        print(
+            "[FeatureCache] Skipped: backbone has unfrozen blocks, "
+            "features change during training."
+        )
+        return None
+
+    variant = args.dino_variant
+    cache_dir = os.path.join(args.data_dir, ".dino_feature_cache")
+    cache_path = os.path.join(cache_dir, f"dinobloom_{variant}.pt")
+
+    image_paths = list(dataset.images)
+
+    if os.path.isfile(cache_path):
+        cached = torch.load(cache_path, map_location="cpu", weights_only=False)
+        if cached.get("image_paths") == image_paths:
+            features: torch.Tensor = cached["features"]
+            print(
+                f"[FeatureCache] Loaded {features.shape[0]} embeddings "
+                f"(dim={features.shape[1]}) from {cache_path}"
+            )
+            return features
+        print("[FeatureCache] Cache stale (image list changed) — re-extracting.")
+
+    print(
+        f"[FeatureCache] Extracting DinoBloom-{variant} features "
+        f"for {len(dataset)} images ..."
+    )
+    backbone, embed_dim = load_dinobloom(variant, device)
+    backbone = backbone.to(device).eval()
+
+    loader = DataLoader(
+        dataset,
+        batch_size=64,
+        shuffle=False,
+        num_workers=min(4, args.num_workers),
+        pin_memory=(device.type == "cuda"),
+    )
+    all_feats: list[torch.Tensor] = []
+    with torch.no_grad():
+        for imgs, _ in tqdm(loader, desc="  [FeatureCache] extracting"):
+            all_feats.append(backbone(imgs.to(device)).cpu())
+
+    features = torch.cat(all_feats, dim=0)  # (N, embed_dim)
+    assert features.shape == (len(dataset), embed_dim), (
+        f"Expected ({len(dataset)}, {embed_dim}), got {features.shape}"
+    )
+
+    os.makedirs(cache_dir, exist_ok=True)
+    torch.save({"image_paths": image_paths, "features": features}, cache_path)
+    print(f"[FeatureCache] Saved to {cache_path}  shape={tuple(features.shape)}")
+
+    del backbone
+    torch.cuda.empty_cache()
+    return features
+
+
 def _build_classifier(args, n_classes: int):
-    """Instantiate classifier (pure ResNet or hybrid TN)."""
+    """Instantiate classifier (pure ResNet, DinoBloom or hybrid TN)."""
+    if args.classifier_network == "hybrid_dino":
+        return hybrid_dino_model(
+            fc_out_features=n_classes,
+            variant=args.dino_variant,
+            n_qubits=args.n_qubits,
+            vqc_layers=args.vqc_layers,
+            vqc_readout=args.vqc_readout,
+            vqc_dropout=args.vqc_dropout,
+            unfreeze_blocks=args.dino_unfreeze_blocks,
+            )
+
+    elif args.classifier_network == "classical_dino":
+        return classical_dino_model(
+            fc_out_features=n_classes,
+            variant=args.dino_variant,
+            device=DEVICE,
+        )
     if args.classifier_network == "hybrid_tn":
         return hybrid_tn_model(
             fc_out_features=n_classes,
@@ -487,6 +591,7 @@ def _log_wandb_cv_summary(
         group=base_run_name,
         job_type="cv_summary",
         config=config,
+        mode="disabled" if args.no_wandb else "online",
     )
 
     has_test = any("test_accuracy" in row for row in fold_summaries)
@@ -566,8 +671,13 @@ def _log_wandb_cv_summary(
 
 def run_train(args: argparse.Namespace) -> None:
     # -- Dataset ------------------------------------------------------------
+    # Special case for DinoBloom + MLL23
+    # The dataset-loader for DinoBloom incorporates processing directly
+    effective_dataset = args.dataset
+    if args.classifier_network in ("classical_dino", "hybrid_dino") and args.dataset == "MLL23":
+        effective_dataset = "MLL23Dino"
     dataset = get_dataset(
-        args.dataset, root_dir=args.data_dir,
+        effective_dataset, root_dir=args.data_dir,
         min_samples_per_class=args.min_samples_per_class,
         exclude_classes=args.exclude_classes,
         below_threshold_strategy=args.below_threshold_strategy,
@@ -603,6 +713,13 @@ def run_train(args: argparse.Namespace) -> None:
 
     # -- 2. Reproducibility ------------------------------------------------
     set_global_seed(args.seed)
+
+    # -- Pre-extract DinoBloom features (once, shared across all folds) -----
+    dino_feature_cache: Optional[torch.Tensor] = None
+    if args.classifier_network == "hybrid_dino" and args.cache_dino_features:
+        # Ensure the DinoBloom pre-processing transform is applied before extraction.
+        dataset.transform = get_dinobloom_transform()
+        dino_feature_cache = _load_or_extract_features(args, dataset, DEVICE)
 
     # Validate ranges
     if not 0.0 <= args.non_rare_aug_prob <= 1.0:
@@ -663,6 +780,7 @@ def run_train(args: argparse.Namespace) -> None:
             group=base_run_name,
             job_type="fold",
             config=config,
+            mode="disabled" if args.no_wandb else "online",
         )
 
         class_names = list(getattr(dataset, "classes", sorted(set(dataset.labels))))
@@ -693,6 +811,12 @@ def run_train(args: argparse.Namespace) -> None:
         classifier = _build_classifier(args, n_classes)
 
         augmentation = get_augmentation(args.augmentation)
+        # Image-space augmentation is not applicable for DinoBloom classifiers:
+        # the backbone expects un-augmented, standardised 224×224 crops, and with
+        # feature caching the pipeline never sees raw pixels during training.
+        if args.classifier_network in ("classical_dino", "hybrid_dino") and augmentation is not None:
+            print("[DinoBloom] Image augmentation disabled (not applicable for frozen-ViT pipeline).")
+            augmentation = None
         aug_targets = None
         non_target_prob = 1.0
         if args.conditional_augmentation and augmentation is not None:
@@ -709,6 +833,36 @@ def run_train(args: argparse.Namespace) -> None:
             freeze_processor=args.freeze_processor,
         ).to(DEVICE)
 
+        # Dataloaders
+        nw = max(0, args.num_workers)
+        
+        
+        # For DinoBloom: 
+        # -- Feature caching: activate when pre-computed embeddings are available ---        
+        if dino_feature_cache is not None and args.classifier_network == "hybrid_dino":
+            dataset = CachedEmbeddingDataset(dino_feature_cache, dataset.labels)
+            model.classifier.use_cached_features = True
+            # Move backbone to CPU: no longer needed on GPU during training.
+            model.classifier.backbone = model.classifier.backbone.cpu()
+            nw = 0   # in-memory tensors; workers add overhead
+            print("[FeatureCache] Training from pre-computed embeddings (backbone on CPU).")
+
+        # -- Load DinoBloom: load pretrained hybrid_dino checkpoint ---------------------
+        if args.dino_model_weights and args.classifier_network == "hybrid_dino":
+            ckpt = torch.load(args.dino_model_weights, map_location="cpu", weights_only=False)
+            missing, unexpected = model.load_state_dict(ckpt, strict=False)
+            q_proj_keys = [k for k in missing if "q_proj" in k]
+            other_missing = [k for k in missing if "q_proj" not in k]
+            print(f"[DinoBloom] Loaded '{args.dino_model_weights}'")
+            print(f"[DinoBloom] q_proj re-initialised for {n_classes} classes ({len(q_proj_keys)} keys)")
+            if other_missing:
+                print(f"[DinoBloom] Unexpected missing keys: {other_missing[:5]}")
+            if unexpected:
+                print(f"[DinoBloom] Unexpected extra keys: {unexpected[:5]}")
+
+        if args.freeze_dino_adapter and args.classifier_network == "hybrid_dino":
+            model.classifier.freeze_adapter()
+
         # -- Loss / Optimizer / Scheduler / Sampler ----------------------------------
         criterion = _build_criterion(args, class_counts, n_classes, DEVICE)
         optimizer = _build_optimizer(args, model)
@@ -716,7 +870,6 @@ def run_train(args: argparse.Namespace) -> None:
         sampler, dynamic_soft = _build_sampler(args, train_labels, class_counts)
 
         # -- DataLoaders ---------------------------------------------------
-        nw = max(0, args.num_workers)
         ldr_kw: dict = {
             "batch_size": args.batch_size,
             "num_workers": nw,
@@ -765,7 +918,37 @@ def run_train(args: argparse.Namespace) -> None:
         if args.wandb_watch:
             wandb.watch(model, log="gradients", log_freq=100)
 
-        pbar = tqdm(range(1, args.epochs + 1), desc="Epochs")
+        # -- Classical probe for DinoBloom Classical: Logistic Regression. extract features, fit once, evaluate once -------
+        _probe_done = False
+        if isinstance(classifier, ClassicalDinoClassifier):
+            feats_list, labs_list = [], []
+            model.eval()
+            with torch.no_grad():
+                for imgs, lbls in train_loader:
+                    imgs = imgs.to(DEVICE)
+                    if model.normalization is not None:
+                        imgs = model.normalization(imgs)
+                    feats_list.append(classifier.backbone(imgs).cpu().numpy())
+                    labs_list.append(lbls.numpy())
+            classifier.fit(np.concatenate(feats_list), np.concatenate(labs_list))
+            val_loss, val_m, val_labels, val_preds = validate(
+                model, val_loader, criterion, DEVICE, display_class_names,
+            )
+            print(f"  Val macro_F1={val_m['macro_f1']:.4f}  balanced_acc={val_m['balanced_accuracy']:.4f}")
+            wandb.log({
+                "val/loss": val_loss, "val/acc": val_m["accuracy"],
+                "val/balanced_acc": val_m["balanced_accuracy"],
+                "val/macro_f1": val_m["macro_f1"], "val/weighted_f1": val_m["weighted_f1"],
+                "val/macro_precision": val_m["macro_precision"], "val/macro_recall": val_m["macro_recall"],
+            })
+            best_val_snapshot = {
+                "fold": fold + 1, "epoch": 0, "loss": val_loss, "metrics": val_m,
+                "labels": val_labels.copy(), "preds": val_preds.copy(),
+            }
+            best_f1 = val_m["macro_f1"]
+            _probe_done = True
+
+        pbar = tqdm(range(1, args.epochs + 1) if not _probe_done else [], desc="Epochs")
         for epoch in pbar:
             # Update dynamic sampler if needed
             if dynamic_soft and sampler is not None:

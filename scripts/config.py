@@ -13,6 +13,12 @@ load_dotenv(_PROJECT_ROOT / ".env")
 MICROSCOPY_DATA_DIR = os.environ.get("MICROSCOPY_ROOT", "./data")
 MLL23_DATA_DIR = os.environ.get("MLL23_DATA_DIR")
 
+VARIANT_CONFIG = {
+    "s": ("dinov2_vits14", 384),
+    "b": ("dinov2_vitb14", 768),
+    "l": ("dinov2_vitl14", 1024),
+    "g": ("dinov2_vitg14", 1536),
+}
 
 def parse_args() -> argparse.Namespace:
     """Parse and return command-line arguments."""
@@ -135,7 +141,7 @@ def parse_args() -> argparse.Namespace:
     # -- Classifier --------------------------------------------------------
     cl = parser.add_argument_group("Classifier")
     cl.add_argument("--classifier_network", type=str, default="resnet18",
-                    choices=["resnet18", "resnet34", "resnet50", "hybrid_tn", "hybrid_vqc"],
+                    choices=["resnet18", "resnet34", "resnet50", "hybrid_tn", "hybrid_vqc", "classical_dino", "hybrid_dino"],
                     help="Classifier architecture.")
     cl.add_argument("--classifier_pretrained", action="store_true",
                     help="Use pretrained ResNet backbone weights. If --backbone_weights "
@@ -154,6 +160,12 @@ def parse_args() -> argparse.Namespace:
                     help="Path to custom .pth ResNet backbone weights used when "
                          "--classifier_pretrained is enabled. If omitted, "
                          "--classifier_pretrained uses ImageNet weights.")
+    cl.add_argument("--dino_variant", choices=list(VARIANT_CONFIG), default="b",
+                        help="DinoBloom variant: s/b/l/g (default: b)")
+    cl.add_argument("--dino_hidden_dim", type=int, default=256,
+                        help="Hidden layer width for ClassicalDinoClassifier (default: 256)")
+    cl.add_argument("--dino_dropout", type=float, default=0.3,
+                        help="Dropout probability for ClassicalDinoClassifier (default: 0.3)")
 
     # -- Hybrid models ----------------------------------------------------
     hy = parser.add_argument_group("Hybrid models")
@@ -183,6 +195,23 @@ def parse_args() -> argparse.Namespace:
                          "full (<X>,<Y>,<Z>) vector; 'full' adds {XX,YY,ZZ} ring correlators.")
     hy.add_argument("--vqc_dropout", type=float, default=0.0,
                     help="Dropout probability applied to the VQC read-out before q_proj.")
+    hy.add_argument("--cache_dino_features", action="store_true",
+                    help="Pre-extract DinoBloom CLS embeddings for every image before training "
+                         "and serve them from RAM instead of re-running the ViT each batch. "
+                         "The cache is written to {data_dir}/.dino_feature_cache/ and reused "
+                         "across runs. Only valid when --dino_unfreeze_blocks 0 (frozen backbone).")
+    hy.add_argument("--dino_unfreeze_blocks", type=int, default=0,
+                    help="Number of trailing DinoBloom transformer blocks to unfreeze for "
+                         "fine-tuning (0 = fully frozen, max 12 for ViT-B). Unfrozen blocks "
+                         "are optimised at --lr; the VQC head uses --lr_head.")
+    hy.add_argument("--dino_model_weights", type=str, default=None,
+                    help="Path to a full hybrid_dino model checkpoint (best_model.pth) saved "
+                         "by --save_model on a previous run. Loaded with strict=False so "
+                         "q_proj is re-initialised when n_classes differs between runs.")
+    hy.add_argument("--freeze_dino_adapter", action="store_true",
+                    help="Freeze the MLP angle_map, VQC, and angle_scale after loading "
+                         "--dino_model_weights. Only q_norm and q_proj remain trainable, "
+                         "enabling lightweight fine-tuning of the classification head only.")
 
     # -- Adversarial -------------------------------------------------------
     parser.add_argument("--adv_parameters",
@@ -203,6 +232,8 @@ def parse_args() -> argparse.Namespace:
                          "and fold suffix are appended automatically.")
     wb.add_argument("--wandb_watch", action="store_true",
                     help="Enable wandb.watch() gradient tracking.")
+    wb.add_argument("--no_wandb", action="store_true",
+                    help="Disable W&B logging entirely (runs offline/disabled mode).")
 
     args = parser.parse_args()
     if args.resnet_freeze_mode != "none" and not args.classifier_pretrained:
