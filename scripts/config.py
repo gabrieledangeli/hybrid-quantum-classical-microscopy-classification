@@ -183,6 +183,11 @@ def parse_args() -> argparse.Namespace:
                          "full (<X>,<Y>,<Z>) vector; 'full' adds {XX,YY,ZZ} ring correlators.")
     hy.add_argument("--vqc_dropout", type=float, default=0.0,
                     help="Dropout probability applied to the VQC read-out before q_proj.")
+    hy.add_argument("--vqc_head_type", type=str, default="vqc",
+                    choices=["vqc", "classical_affine", "classical_lowrank", "classical_mlp"],
+                    help="hybrid_vqc head block: the VQC (default) or a classical control "
+                         "swapped in its place. 'classical_affine'/'classical_lowrank' match the "
+                         "VQC parameter budget; 'classical_mlp' is an over-capacity control.")
 
     # -- Adversarial -------------------------------------------------------
     parser.add_argument("--adv_parameters",
@@ -210,8 +215,10 @@ def parse_args() -> argparse.Namespace:
 
     if args.backbone_weights and not args.classifier_pretrained:
         parser.error("--backbone_weights requires --classifier_pretrained.")
-    if args.save_backbone and args.classifier_network not in ("resnet18", "resnet34", "resnet50"):
-        parser.error("--save_backbone is supported only with plain ResNet classifiers.")
+    if args.save_backbone and args.classifier_network not in (
+        "resnet18", "resnet34", "resnet50", "hybrid_tn", "hybrid_vqc"
+    ):
+        parser.error("--save_backbone requires a ResNet-backed classifier.")
     if args.data_dir is None:
         if args.dataset == "MLL23":
             if not MLL23_DATA_DIR:

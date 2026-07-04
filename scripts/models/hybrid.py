@@ -728,9 +728,125 @@ class VariationalQuantumLayer(nn.Module):
         return self.qlayer(x)
 
 
-# -- ResNet feature extractor ---------------------------------------------
+def _vqc_readout_dim(n_qubits: int, readout: str) -> int:
+    """
+    Read-out width of VariationalQuantumLayer for a given qubit count.
 
-_FEAT_DIM = {"resnet18": 512, "resnet34": 512, "resnet50": 2048}
+    Mirrors the observable spec built in VariationalQuantumLayer.__init__ so
+    the classical control head can expose an identical ``readout_dim`` without
+    instantiating a quantum device.
+    """
+    readout = readout.lower().strip()
+    
+    if readout not in VariationalQuantumLayer.VALID_READOUTS:
+        raise ValueError(
+            f"readout must be one of {VariationalQuantumLayer.VALID_READOUTS}, got '{readout}'."
+        )
+    
+    n_pairs = ((n_qubits - 1) + (1 if n_qubits > 2 else 0)) if n_qubits > 1 else 0
+    
+    single = {
+        "z": 1, 
+        "z+zz": 1, 
+        "z+zz_mean": 1, 
+        "bloch": 3, 
+        "full": 3
+    }[readout]
+    
+    corr = {
+        "z": 0, 
+        "z+zz": 1, 
+        "z+zz_mean": 0, 
+        "bloch": 0, 
+        "full": 3
+    }[readout]
+    
+    dim = single * n_qubits + corr * n_pairs
+    
+    if readout == "z+zz_mean" and n_pairs:
+        dim += 1
+    
+    return dim
+
+
+class ClassicalReadoutBlock(nn.Module):
+    """
+    Classical drop-in replacement for VariationalQuantumLayer.
+
+    Modes:
+      * ``classical_affine`` Exactly matches the VQC
+        trainable-parameter budget when 3*n_qubits == readout_dim (true for bloch). 
+      * ``classical_lowrank`` rank-r linear map U V.T with r chosen so
+        the parameter count matches the VQC budget as closely as possible.
+      * ``classical_mlp`` in -> hidden -> out MLP (GELU). 
+        Deliberately over-capacity control.
+    """
+    def __init__(
+        self,
+        n_qubits: int,
+        n_layers: int,
+        readout: str = "z+zz",
+        mode: str = "classical_lowrank",
+        mlp_hidden: int = 64,
+    ) -> None:
+        super().__init__()
+        if mode not in ("classical_affine", "classical_lowrank", "classical_mlp"):
+            raise ValueError(f"mode must be one of "
+                             f"('classical_affine', 'classical_lowrank', 'classical_mlp'),"
+                             f" got '{{mode}}'.")
+        
+        self.n_qubits = n_qubits
+        self.readout = readout.lower().strip()
+        self.readout_dim = _vqc_readout_dim(n_qubits, self.readout)
+        
+        self.mode = mode
+        in_dim = 3 * n_qubits
+        out_dim = self.readout_dim
+        self.vqc_budget = 6 * n_qubits * n_layers  # VQC trainable-param count
+
+        if mode == "classical_affine":
+            if in_dim != out_dim:
+                raise ValueError(
+                    f"classical_affine requires 3*n_qubits == readout_dim "
+                    f"({in_dim} vs {out_dim}); use classical_lowrank for readout='{self.readout}'."
+                )
+            self.scale = nn.Parameter(torch.ones(out_dim))
+            self.shift = nn.Parameter(torch.zeros(out_dim))
+        elif mode == "classical_lowrank":
+            self.rank = max(1, round(self.vqc_budget / (in_dim + out_dim)))
+            self.U = nn.Parameter(torch.randn(out_dim, self.rank) * 0.02)
+            self.V = nn.Parameter(torch.randn(in_dim, self.rank) * 0.02)
+        else:
+            # MLP
+            self.net = nn.Sequential(
+                nn.Linear(in_dim, mlp_hidden), 
+                nn.GELU(), 
+                nn.Linear(mlp_hidden, out_dim)
+            )
+
+        self.n_params = sum(p.numel() for p in self.parameters())
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if x.shape[-1] == self.n_qubits:
+            x = x.unsqueeze(-1).expand(*x.shape, 3).reshape(*x.shape[:-1], 3 * self.n_qubits)
+        elif x.shape[-1] != 3 * self.n_qubits:
+            raise ValueError(
+                f"Expected last input dimension {3 * self.n_qubits} or {self.n_qubits}, "
+                f"got {x.shape[-1]}."
+            )
+        if self.mode == "classical_affine":
+            return x * self.scale + self.shift
+        if self.mode == "classical_lowrank":
+            return (x @ self.V) @ self.U.t()
+        return self.net(x)
+
+
+# -- ResNet feature extractor ---------------------------------------------
+_FEAT_DIM = {
+    "resnet18": 512, 
+    "resnet34": 512, 
+    "resnet50": 2048
+}
 
 
 class _ResNetFeatureExtractor(nn.Module):
@@ -944,10 +1060,12 @@ class SimpleHybridVQCClassifier(nn.Module):
         backbone: str = "resnet18",
         backbone_weights: Optional[str] = None,
         pretrained: bool = True,
+        head_type: str = "vqc",
     ) -> None:
         super().__init__()
         if not 0.0 <= vqc_dropout < 1.0:
             raise ValueError(f"vqc_dropout must be in [0, 1), got {vqc_dropout}.")
+        self.head_type = head_type
 
         self.n_classes = n_classes
         self.n_qubits = n_qubits
@@ -967,7 +1085,12 @@ class SimpleHybridVQCClassifier(nn.Module):
             nn.Dropout(p=_VQC_ANGLE_DROPOUT),
             nn.Linear(_VQC_ANGLE_HIDDEN_DIM, 3 * n_qubits),
         )
-        self.quantum = VariationalQuantumLayer(n_qubits, vqc_layers, readout=vqc_readout)
+        if head_type == "vqc":
+            self.quantum = VariationalQuantumLayer(n_qubits, vqc_layers, readout=vqc_readout)
+        else:
+            self.quantum = ClassicalReadoutBlock(
+                n_qubits, vqc_layers, readout=vqc_readout, mode=head_type
+            )
 
         readout_dim = self.quantum.readout_dim
         self.q_norm = nn.BatchNorm1d(readout_dim)
@@ -1033,6 +1156,7 @@ def hybrid_vqc_model(
     backbone: str = "resnet18",
     backbone_weights: Optional[str] = None,
     pretrained: bool = True,
+    head_type: str = "vqc",
 ) -> SimpleHybridVQCClassifier:
     """Factory for `SimpleHybridVQCClassifier`."""
     return SimpleHybridVQCClassifier(
@@ -1045,4 +1169,5 @@ def hybrid_vqc_model(
         backbone=backbone,
         backbone_weights=backbone_weights,
         pretrained=pretrained,
+        head_type=head_type,
     )

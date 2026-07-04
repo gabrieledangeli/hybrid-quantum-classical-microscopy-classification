@@ -199,6 +199,7 @@ def _build_classifier(args, n_classes: int):
             backbone=args.backbone,
             backbone_weights=args.backbone_weights,
             pretrained=args.classifier_pretrained,
+            head_type=args.vqc_head_type,
         )
     elif args.classifier_network in ("resnet18", "resnet34", "resnet50"):
         return resnet_model(
