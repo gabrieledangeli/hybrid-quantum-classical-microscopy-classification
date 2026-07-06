@@ -135,7 +135,7 @@ def parse_args() -> argparse.Namespace:
     # -- Classifier --------------------------------------------------------
     cl = parser.add_argument_group("Classifier")
     cl.add_argument("--classifier_network", type=str, default="resnet18",
-                    choices=["resnet18", "resnet34", "resnet50", "hybrid_tn", "hybrid_vqc"],
+                    choices=["resnet18", "resnet34", "resnet50", "hybrid_vqc"],
                     help="Classifier architecture.")
     cl.add_argument("--classifier_pretrained", action="store_true",
                     help="Use pretrained ResNet backbone weights. If --backbone_weights "
@@ -158,36 +158,45 @@ def parse_args() -> argparse.Namespace:
     # -- Hybrid models ----------------------------------------------------
     hy = parser.add_argument_group("Hybrid models")
     hy.add_argument("--n_qubits", type=int, default=8,
-                    help="Number of VQC qubits. For hybrid_tn, this is also the "
-                         "number of TN sites/final states. PEPS uses 16 fixed sites.")
-    hy.add_argument("--ttn_leaves", type=int, default=64,
-                    choices=[16, 32, 64, 128],
-                    help="Number of input leaves for TTN.")
-    hy.add_argument("--tn_bond_dim", type=int, default=64,
-                    help="Internal TN bond dimension. For exact PEPS this is clipped to 8.")
-    hy.add_argument("--tn_phys_dim", type=int, default=2,
-                    help="Physical (site) dimension of the TN.")
-    hy.add_argument("--tn_hidden_dim", type=int, default=128,
-                    help="Hidden dimension of the per-site encoder MLP feeding the TN.")
-    hy.add_argument("--tn_bridge", type=str, default="mps",
-                    choices=["mps", "peps", "ttn"],
-                    help="Tensor-network bridge type for hybrid_tn. PEPS uses a fixed "
-                         "exact 4x4 topology; TTN uses --ttn_leaves leaves.")
+                    help="Number of VQC qubits (minimum 2).")
     hy.add_argument("--vqc_layers", type=int, default=2,
-                    help="Parametrised VQC layers (also the number of data re-uploads).")
+                    help="Parametrised VQC layers (minimum 1; also the number of data re-uploads).")
     hy.add_argument("--vqc_readout", type=str, default="z+zz",
                     choices=["z", "z+zz", "z+zz_mean", "bloch", "full"],
                     help="VQC read-out observables: 'z' single-qubit <Z>; 'z+zz' adds "
                          "nearest-neighbour <ZZ> ring correlators (default); 'z+zz_mean' "
                          "adds one pooled mean of the <ZZ> ring correlators; 'bloch' the "
                          "full (<X>,<Y>,<Z>) vector; 'full' adds {XX,YY,ZZ} ring correlators.")
-    hy.add_argument("--vqc_dropout", type=float, default=0.0,
-                    help="Dropout probability applied to the VQC read-out before q_proj.")
     hy.add_argument("--vqc_head_type", type=str, default="vqc",
                     choices=["vqc", "classical_affine", "classical_lowrank", "classical_mlp"],
                     help="hybrid_vqc head block: the VQC (default) or a classical control "
                          "swapped in its place. 'classical_affine'/'classical_lowrank' match the "
                          "VQC parameter budget; 'classical_mlp' is an over-capacity control.")
+    hy.add_argument("--vqc_angle_map", type=str, default="linear",
+                    choices=["linear", "mlp"],
+                    help="hybrid_vqc adapter from ResNet features to VQC angles: 'linear' "
+                         "(default) is a single feat->3q map; 'mlp' adds a hidden layer "
+                         "of size --vqc_angle_hidden_dim with GELU and dropout.")
+    hy.add_argument("--vqc_angle_hidden_dim", type=int, default=64,
+                    help="Hidden dimension of the MLP angle map.")
+    hy.add_argument("--vqc_angle_dropout", type=float, default=0.2,
+                    help="Dropout probability inside the MLP angle map.")
+    hy.add_argument("--vqc_entangler", type=str, default="cnot",
+                    choices=["cnot", "crz", "ising_zz"],
+                    help="Two-qubit entangler on the ring: fixed CNOTs (default) or "
+                         "trainable CRZ / IsingZZ gates (+n_layers*n_pairs params, "
+                         "near-identity init). CRZ/IsingZZ are diagonal in Z, so with "
+                         "a Z-only --vqc_readout combine them with --vqc_final_rotation, "
+                         "otherwise the last entangling ring is invisible to the read-out.")
+    hy.add_argument("--vqc_final_rotation", action="store_true",
+                    help="Append a trainable Rot(a,b,g) per qubit after the last "
+                         "entangling ring (trainable measurement basis; "
+                         "+3*n_qubits params, near-identity init).")
+    hy.add_argument("--vqc_blocks", type=int, default=1,
+                    help="Split the VQC into this many independent parallel sub-circuits "
+                         "of n_qubits/vqc_blocks qubits each, with concatenated "
+                         "read-outs. Must divide --n_qubits and leave at least "
+                         "2 qubits per block. Default 1 = single circuit.")
 
     # -- Adversarial -------------------------------------------------------
     parser.add_argument("--adv_parameters",
@@ -210,13 +219,29 @@ def parse_args() -> argparse.Namespace:
                     help="Enable wandb.watch() gradient tracking.")
 
     args = parser.parse_args()
+    if args.n_qubits < 2:
+        parser.error(f"--n_qubits must be >= 2, got {args.n_qubits}.")
+    if args.vqc_layers < 1:
+        parser.error(f"--vqc_layers must be >= 1, got {args.vqc_layers}.")
+    if args.vqc_blocks < 1:
+        parser.error(f"--vqc_blocks must be >= 1, got {args.vqc_blocks}.")
+    if args.n_qubits % args.vqc_blocks != 0:
+        parser.error(
+            f"--vqc_blocks must divide --n_qubits "
+            f"(got {args.vqc_blocks} with {args.n_qubits} qubits)."
+        )
+    if args.n_qubits // args.vqc_blocks < 2:
+        parser.error(
+            f"Each VQC block must have >= 2 qubits; got --n_qubits "
+            f"{args.n_qubits} and --vqc_blocks {args.vqc_blocks}."
+        )
     if args.resnet_freeze_mode != "none" and not args.classifier_pretrained:
         parser.error("--resnet_freeze_mode partial or full requires --classifier_pretrained.")
 
     if args.backbone_weights and not args.classifier_pretrained:
         parser.error("--backbone_weights requires --classifier_pretrained.")
     if args.save_backbone and args.classifier_network not in (
-        "resnet18", "resnet34", "resnet50", "hybrid_tn", "hybrid_vqc"
+        "resnet18", "resnet34", "resnet50", "hybrid_vqc"
     ):
         parser.error("--save_backbone requires a ResNet-backed classifier.")
     if args.data_dir is None:
