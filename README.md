@@ -28,7 +28,7 @@ This project investigates whether **variational quantum circuits (VQC)** can imp
 
 | Feature | Description |
 |---|---|
-| **Multiple classifiers** | ResNet-18/34/50 (pure) and Hybrid VQC (ResNet -> angle map -> VQC -> head), with classical control heads for ablations |
+| **Multiple classifiers** | ResNet-18/34/50 (pure) and Hybrid VQC (ResNet -> angle map -> VQC -> head) |
 | **RAW image processing** | Static (NumPy), parametrised (differentiable PyTorch), and neural-network (U-Net++) pipelines |
 | **Class-imbalance handling** | Weighted loss (Effective Number of Samples), weighted random sampling, soft undersampling with warm-up, conditional augmentation for rare classes |
 | **Cross-validation** | Stratified K-Fold and Stratified Shuffle-Split |
@@ -101,7 +101,7 @@ HQCNNxLargeScaleMedicalImages/
     +-- models/
     |   +-- __init__.py
     |   +-- classifiers.py      # ResNet factory, EndToEndModel, TensorNormalize
-    |   +-- hybrid.py           # VQC, ClassicalReadoutBlock, SimpleHybridVQCClassifier
+    |   +-- hybrid.py           # VariationalQuantumLayer, ParallelVQCLayer, SimpleHybridVQCClassifier
     |   +-- losses.py           # Focal Loss
     +-- processing/
     |   +-- __init__.py
@@ -261,13 +261,6 @@ The circuit itself is configurable beyond depth/width:
   `K` must divide `--n_qubits` and leave at least two qubits per block, so ring
   correlators and trainable entangler parameters remain well-defined.
 
-Swap the quantum head for an approximately parameter-matched low-rank classical
-control with `--vqc_head_type classical_lowrank` to measure the VQC's
-contribution under an identical training recipe. `classical_affine` is a
-lighter scale/shift control available when input and read-out widths match;
-`classical_mlp` is an over-capacity control. The controls mirror the read-out
-width of the exact circuit configuration, including parallel blocks.
-
 ### RGB dataset with strong augmentation
 
 ```bash
@@ -319,7 +312,7 @@ Run `python scripts/train.py --help` for the full list. Key groups:
 | **Augmentation** | `--augmentation`, `--conditional_augmentation`, `--rare_class_threshold`, `--non_rare_aug_prob` |
 | **Training** | `--batch_size`, `--lr`, `--lr_head`, `--epochs`, `--loss_fn`, `--focal_gamma` |
 | **Classifier** | `--classifier_network`, `--classifier_pretrained`, `--resnet_freeze_mode` |
-| **Hybrid VQC** | `--n_qubits`, `--vqc_layers`, `--vqc_readout`, `--vqc_entangler`, `--vqc_final_rotation`, `--vqc_blocks`, `--vqc_head_type`, `--vqc_angle_map`, `--vqc_angle_hidden_dim`, `--vqc_angle_dropout`, `--backbone` |
+| **Hybrid VQC** | `--n_qubits`, `--vqc_layers`, `--vqc_readout`, `--vqc_entangler`, `--vqc_final_rotation`, `--vqc_blocks`, `--vqc_angle_map`, `--vqc_angle_hidden_dim`, `--vqc_angle_dropout`, `--backbone` |
 | **W&B** | `--wandb_project`, `--wandb_entity`, `--run_name`, `--wandb_watch` |
 
 ---
