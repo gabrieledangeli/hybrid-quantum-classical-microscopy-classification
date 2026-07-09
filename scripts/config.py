@@ -131,6 +131,13 @@ def parse_args() -> argparse.Namespace:
     tr.add_argument("--focal_gamma", type=float, default=2.0,
                     help="Focusing parameter gamma for Focal Loss.")
     tr.add_argument("--epochs", type=int, default=50)
+    tr.add_argument("--eval_only", action="store_true",
+                    help="Skip training entirely: run a single forward pass over the "
+                         "validation (and test, if --test_size > 0) split and report "
+                         "metrics. No optimizer/scheduler is built, so this also works "
+                         "when every parameter is frozen (e.g. --freeze_base "
+                         "--freeze_dino_head). --save_model has no effect here since "
+                         "the loaded checkpoint is never modified.")
     tr.add_argument("--save_model", action="store_true",
                     help="Save the best model checkpoint.")
     tr.add_argument("--save_backbone", action="store_true",
@@ -208,10 +215,24 @@ def parse_args() -> argparse.Namespace:
                     help="Path to a full hybrid_dino model checkpoint (best_model.pth) saved "
                          "by --save_model on a previous run. Loaded with strict=False so "
                          "q_proj is re-initialised when n_classes differs between runs.")
-    hy.add_argument("--freeze_dino_adapter", action="store_true",
-                    help="Freeze the MLP angle_map, VQC, and angle_scale after loading "
-                         "--dino_model_weights. Only q_norm and q_proj remain trainable, "
-                         "enabling lightweight fine-tuning of the classification head only.")
+    hy.add_argument("--freeze_base", action="store_true",
+                    help="Freeze the MLP angle_map (adapter hidden layer + angle-map output "
+                         "layer), VQC, and angle_scale after loading --dino_model_weights. "
+                         "Only q_norm and q_proj remain trainable, enabling lightweight "
+                         "fine-tuning of the classification head only.")
+    hy.add_argument("--freeze_dino_mlp_adapter", action="store_true",
+                    help="Freeze only the angle_map MLP (both linears -- adapter hidden layer "
+                         "+ angle-map output layer) after loading --dino_model_weights. "
+                         "angle_scale, the VQC, q_norm, and q_proj remain trainable -- use to "
+                         "retrain the VQC-onward stages on a new dataset while keeping the "
+                         "DinoBloom-facing adapter fixed. Mutually exclusive in effect with "
+                         "--freeze_base (which also freezes the VQC); do not combine the two.")
+    hy.add_argument("--freeze_dino_head", action="store_true",
+                    help="Freeze q_norm and q_proj after loading --dino_model_weights. "
+                         "Combined with --freeze_base, the entire classifier is "
+                         "frozen (backbone is already frozen by default) -- use with "
+                         "--eval_only for zero-shot evaluation of a fully pretrained "
+                         "checkpoint on a new dataset, with no fine-tuning at all.")
 
     # -- Adversarial -------------------------------------------------------
     parser.add_argument("--adv_parameters",
@@ -241,7 +262,7 @@ def parse_args() -> argparse.Namespace:
 
     if args.backbone_weights and not args.classifier_pretrained:
         parser.error("--backbone_weights requires --classifier_pretrained.")
-    if args.save_backbone and args.classifier_network not in ("resnet18", "resnet34", "resnet50"):
+    if args.save_backbone and args.classifier_network not in ("resnet18", "resnet34", "resnet50", "hybrid_dino"):
         parser.error("--save_backbone is supported only with plain ResNet classifiers.")
     if args.data_dir is None:
         if args.dataset == "MLL23":

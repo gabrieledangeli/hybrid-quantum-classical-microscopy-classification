@@ -860,14 +860,22 @@ def run_train(args: argparse.Namespace) -> None:
             if unexpected:
                 print(f"[DinoBloom] Unexpected extra keys: {unexpected[:5]}")
 
-        if args.freeze_dino_adapter and args.classifier_network == "hybrid_dino":
-            model.classifier.freeze_adapter()
+        if args.freeze_base and args.classifier_network == "hybrid_dino":
+            model.classifier.freeze_base()
+        if args.freeze_dino_mlp_adapter and args.classifier_network == "hybrid_dino":
+            model.classifier.freeze_dino_mlp_adapter()
+        if args.freeze_dino_head and args.classifier_network == "hybrid_dino":
+            model.classifier.freeze_head()
 
         # -- Loss / Optimizer / Scheduler / Sampler ----------------------------------
         criterion = _build_criterion(args, class_counts, n_classes, DEVICE)
-        optimizer = _build_optimizer(args, model)
-        scheduler = _build_scheduler(args, optimizer)
-        sampler, dynamic_soft = _build_sampler(args, train_labels, class_counts)
+        if args.eval_only:
+            optimizer, scheduler = None, None
+            sampler, dynamic_soft = None, False
+        else:
+            optimizer = _build_optimizer(args, model)
+            scheduler = _build_scheduler(args, optimizer)
+            sampler, dynamic_soft = _build_sampler(args, train_labels, class_counts)
 
         # -- DataLoaders ---------------------------------------------------
         ldr_kw: dict = {
@@ -947,6 +955,27 @@ def run_train(args: argparse.Namespace) -> None:
             }
             best_f1 = val_m["macro_f1"]
             _probe_done = True
+            if test_loader is not None:
+                best_state_dict = _copy_state_dict_to_cpu(model)
+        elif args.eval_only:
+            val_loss, val_m, val_labels, val_preds = validate(
+                model, val_loader, criterion, DEVICE, display_class_names,
+            )
+            print(f"  [EvalOnly] Val macro_F1={val_m['macro_f1']:.4f}  balanced_acc={val_m['balanced_accuracy']:.4f}")
+            wandb.log({
+                "val/loss": val_loss, "val/acc": val_m["accuracy"],
+                "val/balanced_acc": val_m["balanced_accuracy"],
+                "val/macro_f1": val_m["macro_f1"], "val/weighted_f1": val_m["weighted_f1"],
+                "val/macro_precision": val_m["macro_precision"], "val/macro_recall": val_m["macro_recall"],
+            })
+            best_val_snapshot = {
+                "fold": fold + 1, "epoch": 0, "loss": val_loss, "metrics": val_m,
+                "labels": val_labels.copy(), "preds": val_preds.copy(),
+            }
+            best_f1 = val_m["macro_f1"]
+            _probe_done = True
+            if test_loader is not None:
+                best_state_dict = _copy_state_dict_to_cpu(model)
 
         pbar = tqdm(range(1, args.epochs + 1) if not _probe_done else [], desc="Epochs")
         for epoch in pbar:

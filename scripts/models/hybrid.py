@@ -1,4 +1,4 @@
-"""Hybrid Quantum-Classical classifiers.
+"""Hybrid Tensor-Network + Variational Quantum Circuit classifier.
 
 Architecture:
     1: ResNet backbone -> TN bridge (MPS / PEPS / TTN) -> PennyLane VQC -> BN -> linear head
@@ -1029,7 +1029,9 @@ class HybridDinoClassifier(nn.Module):
         self.n_classes = n_classes
         self.n_qubits = n_qubits
         self.unfreeze_blocks = unfreeze_blocks
-        self._adapter_frozen = False
+        self._base_frozen = False
+        self._dino_mlp_adapter_frozen = False
+        self._head_frozen = False
         self.use_cached_features: bool = False  # set True after feature pre-extraction
 
         self.backbone, embed_dim = load_dinobloom(variant, device or torch.device("cpu"))
@@ -1070,23 +1072,50 @@ class HybridDinoClassifier(nn.Module):
         q_out = self.q_dropout(self.q_norm(self.quantum(q_in)))                # (B, readout_dim)
         return self.q_proj(q_out)                                               # (B, n_classes)
 
-    def freeze_adapter(self) -> None:
-        """Freeze angle_map, quantum circuit, and angle_scale; leave q_norm + q_proj trainable."""
+    def freeze_base(self) -> None:
+        """Freeze angle_map (adapter MLP + angle-map output layer), quantum
+        circuit, and angle_scale; leave q_norm + q_proj trainable."""
         for p in self.angle_map.parameters():
             p.requires_grad = False
         for p in self.quantum.parameters():
             p.requires_grad = False
         self.angle_scale.requires_grad = False
-        self._adapter_frozen = True
-        print("[HybridDinoClassifier] Adapter (angle_map + quantum + angle_scale) frozen.")
+        self._base_frozen = True
+        print("[HybridDinoClassifier] Base (angle_map + quantum + angle_scale) frozen.")
+
+    def freeze_dino_mlp_adapter(self) -> None:
+        """Freeze only the angle_map MLP (the MLL23-trained hidden and
+        output linears -- adapter hidden layer + angle-map output layer).
+        Leaves angle_scale, quantum (VQC), q_norm, and q_proj trainable --
+        for retraining the VQC-onward stages on a new dataset while keeping
+        the DinoBloom-facing adapter fixed."""
+        for p in self.angle_map.parameters():
+            p.requires_grad = False
+        self._dino_mlp_adapter_frozen = True
+        print("[HybridDinoClassifier] DinoBloom MLP adapter (angle_map) frozen.")
+
+    def freeze_head(self) -> None:
+        """Freeze q_norm + q_proj. Combined with ``freeze_base``, the whole
+        classifier (backbone included) is frozen -- suitable for zero-shot
+        evaluation of a fully pretrained checkpoint on a new dataset."""
+        for p in self.q_norm.parameters():
+            p.requires_grad = False
+        for p in self.q_proj.parameters():
+            p.requires_grad = False
+        self._head_frozen = True
+        print("[HybridDinoClassifier] Head (q_norm + q_proj) frozen.")
 
     def train(self, mode: bool = True) -> "HybridDinoClassifier":
         super().train(mode)
         if self.unfreeze_blocks == 0:
             self.backbone.eval()
-        if self._adapter_frozen:
+        if self._base_frozen:
             self.angle_map.eval()
             self.quantum.eval()
+        elif self._dino_mlp_adapter_frozen:
+            self.angle_map.eval()  # keep Dropout inside the frozen MLP deterministic
+        if self._head_frozen:
+            self.q_norm.eval()  # keep BatchNorm running stats fixed, not batch-recomputed
         return self
 
 
