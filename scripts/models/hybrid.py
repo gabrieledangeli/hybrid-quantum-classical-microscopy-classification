@@ -275,13 +275,6 @@ class VariationalQuantumLayer(nn.Module):
         return self.qlayer(x)
 
 
-def _ring_pair_count(n_qubits: int) -> int:
-    """Number of nearest-neighbour pairs on the entangling ring."""
-    if n_qubits < 2:
-        return 0
-    return (n_qubits - 1) + (1 if n_qubits > 2 else 0)
-
-
 def _validate_vqc_dimensions(n_qubits: int, n_layers: int, n_blocks: int = 1) -> int:
     """Validate VQC dimensions and return the qubits per block."""
     if n_qubits < 2:
@@ -303,78 +296,6 @@ def _validate_vqc_dimensions(n_qubits: int, n_layers: int, n_blocks: int = 1) ->
             f"n_blocks={n_blocks}."
         )
     return block_qubits
-
-
-def _vqc_param_count(
-    n_qubits: int,
-    n_layers: int,
-    entangler: str = "cnot",
-    final_rotation: bool = False,
-    n_blocks: int = 1,
-) -> int:
-    """
-    Trainable-parameter count of the (possibly parallel) VQC head.
-
-    Mirrors the weight shapes registered in VariationalQuantumLayer so the
-    classical controls can match the quantum parameter budget without
-    instantiating a quantum device.
-    """
-    entangler = entangler.lower().strip()
-    if entangler not in VariationalQuantumLayer.VALID_ENTANGLERS:
-        raise ValueError(
-            f"entangler must be one of {VariationalQuantumLayer.VALID_ENTANGLERS}, "
-            f"got '{entangler}'."
-        )
-    block_qubits = _validate_vqc_dimensions(n_qubits, n_layers, n_blocks)
-    per_block = 6 * block_qubits * n_layers
-    if entangler != "cnot":
-        per_block += n_layers * _ring_pair_count(block_qubits)
-    if final_rotation:
-        per_block += 3 * block_qubits
-    return n_blocks * per_block
-
-
-def _vqc_readout_dim(n_qubits: int, readout: str) -> int:
-    """
-    Read-out width of VariationalQuantumLayer for a given qubit count.
-
-    Mirrors the observable spec built in VariationalQuantumLayer.__init__ so
-    the classical control head can expose an identical ``readout_dim`` without
-    instantiating a quantum device.
-    """
-    readout = readout.lower().strip()
-    if n_qubits < 2:
-        raise ValueError(f"n_qubits must be >= 2, got {n_qubits}.")
-
-    if readout not in VariationalQuantumLayer.VALID_READOUTS:
-        raise ValueError(
-            f"readout must be one of {VariationalQuantumLayer.VALID_READOUTS}, got '{readout}'."
-        )
-
-    n_pairs = _ring_pair_count(n_qubits)
-
-    single = {
-        "z": 1, 
-        "z+zz": 1, 
-        "z+zz_mean": 1, 
-        "bloch": 3, 
-        "full": 3
-    }[readout]
-    
-    corr = {
-        "z": 0, 
-        "z+zz": 1, 
-        "z+zz_mean": 0, 
-        "bloch": 0, 
-        "full": 3
-    }[readout]
-    
-    dim = single * n_qubits + corr * n_pairs
-    
-    if readout == "z+zz_mean" and n_pairs:
-        dim += 1
-
-    return dim
 
 
 class ParallelVQCLayer(nn.Module):
@@ -445,90 +366,6 @@ class ParallelVQCLayer(nn.Module):
             for j, block in enumerate(self.blocks)
         ]
         return torch.cat(outs, dim=-1)
-
-
-class ClassicalReadoutBlock(nn.Module):
-    """
-    Classical drop-in replacement for VariationalQuantumLayer.
-
-    Modes:
-      * ``classical_affine`` Exactly matches the VQC
-        trainable-parameter budget when 3*n_qubits == readout_dim (true for bloch). 
-      * ``classical_lowrank`` rank-r linear map U V.T with r chosen so
-        the parameter count matches the VQC budget as closely as possible.
-      * ``classical_mlp`` in -> hidden -> out MLP (GELU). 
-        Deliberately over-capacity control.
-    """
-    def __init__(
-        self,
-        n_qubits: int,
-        n_layers: int,
-        readout: str = "z+zz",
-        mode: str = "classical_lowrank",
-        mlp_hidden: int = 64,
-        n_blocks: int = 1,
-        entangler: str = "cnot",
-        final_rotation: bool = False,
-        incremental_reuploading: bool = False,
-    ) -> None:
-        super().__init__()
-        if mode not in ("classical_affine", "classical_lowrank", "classical_mlp"):
-            raise ValueError(f"mode must be one of "
-                             f"('classical_affine', 'classical_lowrank', 'classical_mlp'),"
-                             f" got '{{mode}}'.")
-        block_qubits = _validate_vqc_dimensions(n_qubits, n_layers, n_blocks)
-
-        self.n_qubits = n_qubits
-        self.readout = readout.lower().strip()
-        self.incremental_reuploading = incremental_reuploading
-        # Mirror the (possibly parallel) VQC read-out width and param budget.
-        self.readout_dim = n_blocks * _vqc_readout_dim(block_qubits, self.readout)
-
-        self.mode = mode
-        in_dim = (n_layers if incremental_reuploading else 1) * 3 * n_qubits
-        self.input_dim = in_dim
-        out_dim = self.readout_dim
-        self.vqc_budget = _vqc_param_count(
-            n_qubits, n_layers,
-            entangler=entangler, final_rotation=final_rotation, n_blocks=n_blocks,
-        )
-
-        if mode == "classical_affine":
-            if in_dim != out_dim:
-                raise ValueError(
-                    f"classical_affine requires input width == readout_dim "
-                    f"({in_dim} vs {out_dim}); use classical_lowrank for readout='{self.readout}'."
-                )
-            self.scale = nn.Parameter(torch.ones(out_dim))
-            self.shift = nn.Parameter(torch.zeros(out_dim))
-        elif mode == "classical_lowrank":
-            self.rank = max(1, round(self.vqc_budget / (in_dim + out_dim)))
-            self.U = nn.Parameter(torch.randn(out_dim, self.rank) * 0.02)
-            self.V = nn.Parameter(torch.randn(in_dim, self.rank) * 0.02)
-        else:
-            # MLP
-            self.net = nn.Sequential(
-                nn.Linear(in_dim, mlp_hidden), 
-                nn.GELU(), 
-                nn.Linear(mlp_hidden, out_dim)
-            )
-
-        self.n_params = sum(p.numel() for p in self.parameters())
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if x.shape[-1] == self.n_qubits and not self.incremental_reuploading:
-            x = x.unsqueeze(-1).expand(*x.shape, 3).reshape(*x.shape[:-1], 3 * self.n_qubits)
-        elif x.shape[-1] != self.input_dim:
-            raise ValueError(
-                f"Expected last input dimension {self.input_dim}"
-                + ("" if self.incremental_reuploading else f" or {self.n_qubits}")
-                + f", got {x.shape[-1]}."
-            )
-        if self.mode == "classical_affine":
-            return x * self.scale + self.shift
-        if self.mode == "classical_lowrank":
-            return (x @ self.V) @ self.U.t()
-        return self.net(x)
 
 
 # -- ResNet feature extractor ---------------------------------------------
@@ -650,7 +487,6 @@ class SimpleHybridVQCClassifier(nn.Module):
         backbone: str = "resnet18",
         backbone_weights: Optional[str] = None,
         pretrained: bool = True,
-        head_type: str = "vqc",
         angle_map_type: str = "linear",
         angle_map_hidden_dim: int = 64,
         angle_map_dropout: float = 0.2,
@@ -673,7 +509,6 @@ class SimpleHybridVQCClassifier(nn.Module):
             raise ValueError(
                 f"angle_map_dropout must be in [0, 1), got {angle_map_dropout}."
             )
-        self.head_type = head_type
         self.angle_map_type = angle_map_type
 
         self.n_classes = n_classes
@@ -700,24 +535,16 @@ class SimpleHybridVQCClassifier(nn.Module):
         else:
             self.angle_map = nn.Linear(feat_dim, angle_dim)
         _validate_vqc_dimensions(n_qubits, vqc_layers, vqc_blocks)
-        if head_type == "vqc":
-            if vqc_blocks > 1:
-                self.quantum = ParallelVQCLayer(
-                    n_qubits, vqc_layers, readout=vqc_readout, n_blocks=vqc_blocks,
-                    entangler=vqc_entangler, final_rotation=vqc_final_rotation,
-                    incremental_reuploading=incremental_reuploading,
-                )
-            else:
-                self.quantum = VariationalQuantumLayer(
-                    n_qubits, vqc_layers, readout=vqc_readout,
-                    entangler=vqc_entangler, final_rotation=vqc_final_rotation,
-                    incremental_reuploading=incremental_reuploading,
-                )
+        if vqc_blocks > 1:
+            self.quantum = ParallelVQCLayer(
+                n_qubits, vqc_layers, readout=vqc_readout, n_blocks=vqc_blocks,
+                entangler=vqc_entangler, final_rotation=vqc_final_rotation,
+                incremental_reuploading=incremental_reuploading,
+            )
         else:
-            self.quantum = ClassicalReadoutBlock(
-                n_qubits, vqc_layers, readout=vqc_readout, mode=head_type,
-                n_blocks=vqc_blocks, entangler=vqc_entangler,
-                final_rotation=vqc_final_rotation,
+            self.quantum = VariationalQuantumLayer(
+                n_qubits, vqc_layers, readout=vqc_readout,
+                entangler=vqc_entangler, final_rotation=vqc_final_rotation,
                 incremental_reuploading=incremental_reuploading,
             )
 
@@ -747,7 +574,6 @@ def hybrid_vqc_model(
     backbone: str = "resnet18",
     backbone_weights: Optional[str] = None,
     pretrained: bool = True,
-    head_type: str = "vqc",
     angle_map_type: str = "linear",
     angle_map_hidden_dim: int = 64,
     angle_map_dropout: float = 0.2,
@@ -766,7 +592,6 @@ def hybrid_vqc_model(
         backbone=backbone,
         backbone_weights=backbone_weights,
         pretrained=pretrained,
-        head_type=head_type,
         angle_map_type=angle_map_type,
         angle_map_hidden_dim=angle_map_hidden_dim,
         angle_map_dropout=angle_map_dropout,

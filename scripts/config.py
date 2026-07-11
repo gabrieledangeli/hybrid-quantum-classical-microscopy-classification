@@ -167,11 +167,6 @@ def parse_args() -> argparse.Namespace:
                          "nearest-neighbour <ZZ> ring correlators (default); 'z+zz_mean' "
                          "adds one pooled mean of the <ZZ> ring correlators; 'bloch' the "
                          "full (<X>,<Y>,<Z>) vector; 'full' adds {XX,YY,ZZ} ring correlators.")
-    hy.add_argument("--vqc_head_type", type=str, default="vqc",
-                    choices=["vqc", "classical_affine", "classical_lowrank", "classical_mlp"],
-                    help="hybrid_vqc head block: the VQC (default) or a classical control "
-                         "swapped in its place. 'classical_affine'/'classical_lowrank' match the "
-                         "VQC parameter budget; 'classical_mlp' is an over-capacity control.")
     hy.add_argument("--vqc_angle_map", type=str, default="linear",
                     choices=["linear", "mlp"],
                     help="hybrid_vqc adapter from ResNet features to VQC angles: 'linear' "

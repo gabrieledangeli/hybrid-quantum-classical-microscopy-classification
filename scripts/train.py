@@ -181,7 +181,6 @@ def _build_classifier(args, n_classes: int):
             backbone=args.backbone,
             backbone_weights=args.backbone_weights,
             pretrained=args.classifier_pretrained,
-            head_type=args.vqc_head_type,
             angle_map_type=args.vqc_angle_map,
             angle_map_hidden_dim=args.vqc_angle_hidden_dim,
             angle_map_dropout=args.vqc_angle_dropout,
