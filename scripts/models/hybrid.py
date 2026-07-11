@@ -42,10 +42,20 @@ class VariationalQuantumLayer(nn.Module):
     per qubit after the last entangling ring, making the measurement basis
     trainable (+``3 * n_qubits`` parameters, initialised near the identity).
 
-    The preferred input shape is ``(..., 3 * n_qubits)``.
+    When ``incremental_reuploading`` is ``False`` (default) every layer
+    re-uploads the *same* ``3 * n_qubits`` features (standard data
+    re-uploading). When ``True``, layer ``l`` encodes its own fresh feature
+    slice ``inputs[..., l*3*n_qubits:(l+1)*3*n_qubits]``, so each layer adds
+    new information instead of re-encoding the old: the circuit consumes
+    ``n_layers * 3 * n_qubits`` features with no extra quantum parameters.
 
-    ``(..., n_qubits)`` is also accepted as a compatibility path and repeats each
-    scalar across the three rotation axes.
+    The preferred input shape is ``(..., 3 * n_qubits)``, or
+    ``(..., n_layers * 3 * n_qubits)`` with incremental re-uploading
+    (layer-major slices). The expected width is exposed as ``input_dim``.
+
+    ``(..., n_qubits)`` is also accepted as a compatibility path and repeats
+    each scalar across the three rotation axes (incremental re-uploading has
+    no such path).
 
     The read-out is selected by ``readout``:
 
@@ -73,6 +83,7 @@ class VariationalQuantumLayer(nn.Module):
         readout: str = "z+zz",
         entangler: str = "cnot",
         final_rotation: bool = False,
+        incremental_reuploading: bool = False,
     ) -> None:
         super().__init__()
         readout = readout.lower().strip()
@@ -89,6 +100,13 @@ class VariationalQuantumLayer(nn.Module):
         self.readout = readout
         self.entangler = entangler
         self.final_rotation = final_rotation
+        self.incremental_reuploading = incremental_reuploading
+        if incremental_reuploading:
+            self.input_dim = n_layers * 3 * n_qubits
+            self._valid_widths = (self.input_dim,)
+        else:
+            self.input_dim = 3 * n_qubits
+            self._valid_widths = (n_qubits, self.input_dim)
 
         # Nearest-neighbour pairs mirror the entangling ring built below.
         pairs = []
@@ -157,7 +175,14 @@ class VariationalQuantumLayer(nn.Module):
         use_ent_weights = entangler != "cnot" and bool(pairs)
 
         def _circuit_body(inputs, thetas, feature_weights, entangle_weights=None, final_rot=None):
-            if inputs.shape[-1] == 3 * n_qubits:
+            if incremental_reuploading:
+                if inputs.shape[-1] != n_layers * 3 * n_qubits:
+                    raise ValueError(
+                        f"Expected last input dimension {n_layers * 3 * n_qubits} "
+                        f"with incremental re-uploading, got {inputs.shape[-1]}."
+                    )
+                features = inputs.reshape(*inputs.shape[:-1], n_layers, n_qubits, 3)
+            elif inputs.shape[-1] == 3 * n_qubits:
                 features = inputs.reshape(*inputs.shape[:-1], n_qubits, 3)
             elif inputs.shape[-1] == n_qubits:
                 features = inputs.unsqueeze(-1).expand(*inputs.shape, 3)
@@ -168,18 +193,20 @@ class VariationalQuantumLayer(nn.Module):
                 )
 
             for layer in range(n_layers):
-                # Data re-uploading with trainable per-layer encoding weights.
+                # Data (re-)uploading with trainable per-layer encoding weights;
+                # incremental mode encodes a fresh feature slice per layer.
+                f = features[..., layer, :, :] if incremental_reuploading else features
                 for i in range(n_qubits):
                     qml.RX(
-                        thetas[layer, i, 0] + feature_weights[layer, i, 0] * features[..., i, 0],
+                        thetas[layer, i, 0] + feature_weights[layer, i, 0] * f[..., i, 0],
                         wires=i,
                     )
                     qml.RZ(
-                        thetas[layer, i, 1] + feature_weights[layer, i, 1] * features[..., i, 1],
+                        thetas[layer, i, 1] + feature_weights[layer, i, 1] * f[..., i, 1],
                         wires=i,
                     )
                     qml.RY(
-                        thetas[layer, i, 2] + feature_weights[layer, i, 2] * features[..., i, 2],
+                        thetas[layer, i, 2] + feature_weights[layer, i, 2] * f[..., i, 2],
                         wires=i,
                     )
 
@@ -240,10 +267,10 @@ class VariationalQuantumLayer(nn.Module):
                 nn.init.normal_(self.qlayer.final_rot, mean=0.0, std=0.1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if x.shape[-1] not in (self.n_qubits, 3 * self.n_qubits):
+        if x.shape[-1] not in self._valid_widths:
             raise ValueError(
-                f"Expected last input dimension {self.n_qubits} or "
-                f"{3 * self.n_qubits}, got {x.shape[-1]}."
+                f"Expected last input dimension in {self._valid_widths}, "
+                f"got {x.shape[-1]}."
             )
         return self.qlayer(x)
 
@@ -357,10 +384,13 @@ class ParallelVQCLayer(nn.Module):
     ``n_qubits / n_blocks`` qubits, each an independent
     :class:`VariationalQuantumLayer` (own device, own trainable weights, own
     entangling ring). Block ``j`` consumes the contiguous input slice
-    ``[j * 3 * block_qubits, (j + 1) * 3 * block_qubits)`` of the preferred
-    ``(..., 3 * n_qubits)`` input (or the matching ``(..., n_qubits)``
-    compatibility slice), and the block read-outs are concatenated
-    block-major, so ``readout_dim = n_blocks * block_readout_dim``.
+    ``[j * block_input_dim, (j + 1) * block_input_dim)`` of the preferred
+    ``(..., n_blocks * block_input_dim)`` input (or the matching
+    ``(..., n_qubits)`` compatibility slice), and the block read-outs are
+    concatenated block-major, so ``readout_dim = n_blocks * block_readout_dim``.
+    With ``incremental_reuploading`` the layout is block-major then
+    layer-major: each block's slice stays contiguous and is split internally
+    into one fresh sub-slice per layer.
 
     Rationale: keeps the circuit shallow while widening the feature space, and
     the statevector simulation cost drops from ``2^n_qubits`` to
@@ -376,12 +406,14 @@ class ParallelVQCLayer(nn.Module):
         n_blocks: int = 2,
         entangler: str = "cnot",
         final_rotation: bool = False,
+        incremental_reuploading: bool = False,
     ) -> None:
         super().__init__()
         block_qubits = _validate_vqc_dimensions(n_qubits, n_layers, n_blocks)
         self.n_qubits = n_qubits
         self.n_blocks = n_blocks
         self.block_qubits = block_qubits
+        self.incremental_reuploading = incremental_reuploading
         self.blocks = nn.ModuleList(
             VariationalQuantumLayer(
                 self.block_qubits,
@@ -389,21 +421,24 @@ class ParallelVQCLayer(nn.Module):
                 readout=readout,
                 entangler=entangler,
                 final_rotation=final_rotation,
+                incremental_reuploading=incremental_reuploading,
             )
             for _ in range(n_blocks)
         )
         self.readout = self.blocks[0].readout
         self.readout_dim = sum(block.readout_dim for block in self.blocks)
+        self.input_dim = sum(block.input_dim for block in self.blocks)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if x.shape[-1] == 3 * self.n_qubits:
-            chunk = 3 * self.block_qubits
-        elif x.shape[-1] == self.n_qubits:
+        if x.shape[-1] == self.input_dim:
+            chunk = self.blocks[0].input_dim
+        elif x.shape[-1] == self.n_qubits and not self.incremental_reuploading:
             chunk = self.block_qubits
         else:
             raise ValueError(
-                f"Expected last input dimension {self.n_qubits} or "
-                f"{3 * self.n_qubits}, got {x.shape[-1]}."
+                f"Expected last input dimension {self.input_dim}"
+                + ("" if self.incremental_reuploading else f" or {self.n_qubits}")
+                + f", got {x.shape[-1]}."
             )
         outs = [
             block(x[..., j * chunk:(j + 1) * chunk])
@@ -434,6 +469,7 @@ class ClassicalReadoutBlock(nn.Module):
         n_blocks: int = 1,
         entangler: str = "cnot",
         final_rotation: bool = False,
+        incremental_reuploading: bool = False,
     ) -> None:
         super().__init__()
         if mode not in ("classical_affine", "classical_lowrank", "classical_mlp"):
@@ -444,11 +480,13 @@ class ClassicalReadoutBlock(nn.Module):
 
         self.n_qubits = n_qubits
         self.readout = readout.lower().strip()
+        self.incremental_reuploading = incremental_reuploading
         # Mirror the (possibly parallel) VQC read-out width and param budget.
         self.readout_dim = n_blocks * _vqc_readout_dim(block_qubits, self.readout)
 
         self.mode = mode
-        in_dim = 3 * n_qubits
+        in_dim = (n_layers if incremental_reuploading else 1) * 3 * n_qubits
+        self.input_dim = in_dim
         out_dim = self.readout_dim
         self.vqc_budget = _vqc_param_count(
             n_qubits, n_layers,
@@ -458,7 +496,7 @@ class ClassicalReadoutBlock(nn.Module):
         if mode == "classical_affine":
             if in_dim != out_dim:
                 raise ValueError(
-                    f"classical_affine requires 3*n_qubits == readout_dim "
+                    f"classical_affine requires input width == readout_dim "
                     f"({in_dim} vs {out_dim}); use classical_lowrank for readout='{self.readout}'."
                 )
             self.scale = nn.Parameter(torch.ones(out_dim))
@@ -478,12 +516,13 @@ class ClassicalReadoutBlock(nn.Module):
         self.n_params = sum(p.numel() for p in self.parameters())
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if x.shape[-1] == self.n_qubits:
+        if x.shape[-1] == self.n_qubits and not self.incremental_reuploading:
             x = x.unsqueeze(-1).expand(*x.shape, 3).reshape(*x.shape[:-1], 3 * self.n_qubits)
-        elif x.shape[-1] != 3 * self.n_qubits:
+        elif x.shape[-1] != self.input_dim:
             raise ValueError(
-                f"Expected last input dimension {3 * self.n_qubits} or {self.n_qubits}, "
-                f"got {x.shape[-1]}."
+                f"Expected last input dimension {self.input_dim}"
+                + ("" if self.incremental_reuploading else f" or {self.n_qubits}")
+                + f", got {x.shape[-1]}."
             )
         if self.mode == "classical_affine":
             return x * self.scale + self.shift
@@ -578,6 +617,12 @@ class SimpleHybridVQCClassifier(nn.Module):
     re-uploads the same per-qubit feature triplet with independent trainable
     encoding weights and offsets.
 
+    With ``incremental_reuploading`` the angle map instead emits
+    ``vqc_layers * 3 * n_qubits`` angles and each VQC layer encodes its own
+    fresh feature slice (incremental data re-uploading): depth then widens the
+    classical-to-quantum bottleneck rather than re-encoding the same features.
+    The quantum parameter count is unchanged; only the angle map grows.
+
     ``angle_map_type`` selects the adapter in front of the quantum bottleneck:
 
     * ``"linear"`` a single feat -> 3*n_qubits map (default).
@@ -612,6 +657,7 @@ class SimpleHybridVQCClassifier(nn.Module):
         vqc_entangler: str = "cnot",
         vqc_final_rotation: bool = False,
         vqc_blocks: int = 1,
+        incremental_reuploading: bool = False,
     ) -> None:
         super().__init__()
         angle_map_type = angle_map_type.lower().strip()
@@ -632,6 +678,7 @@ class SimpleHybridVQCClassifier(nn.Module):
 
         self.n_classes = n_classes
         self.n_qubits = n_qubits
+        self.incremental_reuploading = incremental_reuploading
 
         self.resnet = _ResNetFeatureExtractor(
             backbone=backbone,
@@ -642,32 +689,36 @@ class SimpleHybridVQCClassifier(nn.Module):
         feat_dim = self.resnet.feature_dim
 
         self.feature_norm = nn.LayerNorm(feat_dim)
+        angle_dim = (vqc_layers if incremental_reuploading else 1) * 3 * n_qubits
         if angle_map_type == "mlp":
             self.angle_map = nn.Sequential(
                 nn.Linear(feat_dim, angle_map_hidden_dim),
                 nn.GELU(),
                 nn.Dropout(p=angle_map_dropout),
-                nn.Linear(angle_map_hidden_dim, 3 * n_qubits),
+                nn.Linear(angle_map_hidden_dim, angle_dim),
             )
         else:
-            self.angle_map = nn.Linear(feat_dim, 3 * n_qubits)
+            self.angle_map = nn.Linear(feat_dim, angle_dim)
         _validate_vqc_dimensions(n_qubits, vqc_layers, vqc_blocks)
         if head_type == "vqc":
             if vqc_blocks > 1:
                 self.quantum = ParallelVQCLayer(
                     n_qubits, vqc_layers, readout=vqc_readout, n_blocks=vqc_blocks,
                     entangler=vqc_entangler, final_rotation=vqc_final_rotation,
+                    incremental_reuploading=incremental_reuploading,
                 )
             else:
                 self.quantum = VariationalQuantumLayer(
                     n_qubits, vqc_layers, readout=vqc_readout,
                     entangler=vqc_entangler, final_rotation=vqc_final_rotation,
+                    incremental_reuploading=incremental_reuploading,
                 )
         else:
             self.quantum = ClassicalReadoutBlock(
                 n_qubits, vqc_layers, readout=vqc_readout, mode=head_type,
                 n_blocks=vqc_blocks, entangler=vqc_entangler,
                 final_rotation=vqc_final_rotation,
+                incremental_reuploading=incremental_reuploading,
             )
 
         readout_dim = self.quantum.readout_dim
@@ -703,6 +754,7 @@ def hybrid_vqc_model(
     vqc_entangler: str = "cnot",
     vqc_final_rotation: bool = False,
     vqc_blocks: int = 1,
+    incremental_reuploading: bool = False,
 ) -> SimpleHybridVQCClassifier:
     """Factory for `SimpleHybridVQCClassifier`."""
     return SimpleHybridVQCClassifier(
@@ -721,4 +773,5 @@ def hybrid_vqc_model(
         vqc_entangler=vqc_entangler,
         vqc_final_rotation=vqc_final_rotation,
         vqc_blocks=vqc_blocks,
+        incremental_reuploading=incremental_reuploading,
     )

@@ -32,7 +32,7 @@ This project investigates whether **variational quantum circuits (VQC)** can imp
 | **RAW image processing** | Static (NumPy), parametrised (differentiable PyTorch), and neural-network (U-Net++) pipelines |
 | **Class-imbalance handling** | Weighted loss (Effective Number of Samples), weighted random sampling, soft undersampling with warm-up, conditional augmentation for rare classes |
 | **Cross-validation** | Stratified K-Fold and Stratified Shuffle-Split |
-| **Quantum simulation** | PennyLane VQC with data re-uploading, trainable encoding frequencies, a configurable read-out (`--vqc_readout`: single-qubit `<Z>`, individual `<ZZ>` ring correlators, pooled mean `<ZZ>` ring correlator, full Bloch vector, or `XX/YY/ZZ` correlators), a configurable entangling ring (`--vqc_entangler`: fixed CNOT or trainable CRZ/IsingZZ), an optional trainable measurement basis (`--vqc_final_rotation`), and optional parallel sub-circuits (`--vqc_blocks`); automatic backend selection (`lightning.gpu` -> `lightning.qubit` -> `default.qubit` backprop fallback) |
+| **Quantum simulation** | PennyLane VQC with data re-uploading, trainable encoding frequencies, a configurable read-out (`--vqc_readout`: single-qubit `<Z>`, individual `<ZZ>` ring correlators, pooled mean `<ZZ>` ring correlator, full Bloch vector, or `XX/YY/ZZ` correlators), a configurable entangling ring (`--vqc_entangler`: fixed CNOT or trainable CRZ/IsingZZ), an optional trainable measurement basis (`--vqc_final_rotation`), optional parallel sub-circuits (`--vqc_blocks`), and optional incremental data re-uploading loading fresh features at every layer (`--incremental_reuploading`); automatic backend selection (`lightning.gpu` -> `lightning.qubit` -> `default.qubit` backprop fallback) |
 | **Experiment tracking** | Weights & Biases integration (metrics, confusion matrices, per-class stats, gradient tracking) |
 
 ---
@@ -260,6 +260,14 @@ The circuit itself is configurable beyond depth/width:
   from `2^n_qubits` to `K * 2^(n_qubits/K)` — a "wide, not deep" scaling path.
   `K` must divide `--n_qubits` and leave at least two qubits per block, so ring
   correlators and trainable entangler parameters remain well-defined.
+* `--incremental_reuploading` switches from standard data re-uploading (every
+  layer re-encodes the *same* `3*n_qubits` features) to incremental
+  re-uploading: the angle map emits `vqc_layers * 3*n_qubits` angles and each
+  layer encodes its own fresh feature slice, so depth widens the
+  classical-to-quantum bottleneck instead of re-encoding old information. The
+  circuit gains no parameters and no depth; only the angle map output grows by
+  a factor of `--vqc_layers` (no effect at `--vqc_layers 1`). Composes with
+  `--vqc_blocks` (block-major, then layer-major slices).
 
 Swap the quantum head for an approximately parameter-matched low-rank classical
 control with `--vqc_head_type classical_lowrank` to measure the VQC's
@@ -319,7 +327,7 @@ Run `python scripts/train.py --help` for the full list. Key groups:
 | **Augmentation** | `--augmentation`, `--conditional_augmentation`, `--rare_class_threshold`, `--non_rare_aug_prob` |
 | **Training** | `--batch_size`, `--lr`, `--lr_head`, `--epochs`, `--loss_fn`, `--focal_gamma` |
 | **Classifier** | `--classifier_network`, `--classifier_pretrained`, `--resnet_freeze_mode` |
-| **Hybrid VQC** | `--n_qubits`, `--vqc_layers`, `--vqc_readout`, `--vqc_entangler`, `--vqc_final_rotation`, `--vqc_blocks`, `--vqc_head_type`, `--vqc_angle_map`, `--vqc_angle_hidden_dim`, `--vqc_angle_dropout`, `--backbone` |
+| **Hybrid VQC** | `--n_qubits`, `--vqc_layers`, `--vqc_readout`, `--vqc_entangler`, `--vqc_final_rotation`, `--vqc_blocks`, `--incremental_reuploading`, `--vqc_head_type`, `--vqc_angle_map`, `--vqc_angle_hidden_dim`, `--vqc_angle_dropout`, `--backbone` |
 | **W&B** | `--wandb_project`, `--wandb_entity`, `--run_name`, `--wandb_watch` |
 
 ---

@@ -188,6 +188,7 @@ def _build_classifier(args, n_classes: int):
             vqc_entangler=args.vqc_entangler,
             vqc_final_rotation=args.vqc_final_rotation,
             vqc_blocks=args.vqc_blocks,
+            incremental_reuploading=args.incremental_reuploading,
         )
     elif args.classifier_network in ("resnet18", "resnet34", "resnet50"):
         return resnet_model(
@@ -328,6 +329,8 @@ def _make_base_run_name(args: argparse.Namespace, started_at: datetime) -> str:
             model_tag += f"-{args.vqc_entangler}"
         if args.vqc_final_rotation:
             model_tag += "-frot"
+        if args.incremental_reuploading:
+            model_tag += "-increup"
 
     return (
         f"{started_label}_{model_tag}"

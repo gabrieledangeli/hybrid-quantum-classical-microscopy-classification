@@ -197,6 +197,13 @@ def parse_args() -> argparse.Namespace:
                          "of n_qubits/vqc_blocks qubits each, with concatenated "
                          "read-outs. Must divide --n_qubits and leave at least "
                          "2 qubits per block. Default 1 = single circuit.")
+    hy.add_argument("--incremental_reuploading", action="store_true",
+                    help="Incremental data re-uploading: the angle map emits "
+                         "vqc_layers*3*n_qubits angles and each VQC layer encodes "
+                         "its own fresh feature slice, instead of re-uploading the "
+                         "same 3*n_qubits features at every layer. Adds no quantum "
+                         "parameters; the angle map output grows by a factor of "
+                         "--vqc_layers. No effect with --vqc_layers 1.")
 
     # -- Adversarial -------------------------------------------------------
     parser.add_argument("--adv_parameters",
