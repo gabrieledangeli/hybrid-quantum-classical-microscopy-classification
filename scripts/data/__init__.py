@@ -1,4 +1,4 @@
-from .dataset import get_dataset, MicroscopyDataset, MicroscopyDatasetRGB, MLL23Dataset, Subset
+from .dataset import get_dataset, MicroscopyDataset, MicroscopyDatasetRGB, MLL23Dataset, Subset, CachedEmbeddingDataset
 from .augmentation import get_augmentation, set_global_seed
 from .utils import load_image, list_images_in_dir, make_stratified_splits
 
@@ -8,6 +8,7 @@ __all__ = [
     "MicroscopyDatasetRGB",
     "MLL23Dataset",
     "Subset",
+    "CachedEmbeddingDataset",
     "get_augmentation",
     "set_global_seed",
     "load_image",
