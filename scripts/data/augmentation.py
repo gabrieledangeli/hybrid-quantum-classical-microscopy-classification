@@ -11,7 +11,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-# -- Reproducibility ----------------------------------------------------------
+# -- Reproducibility ---------------------------------------------------------
 
 
 def set_global_seed(seed: int) -> None:

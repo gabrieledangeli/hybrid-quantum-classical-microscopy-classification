@@ -13,6 +13,12 @@ load_dotenv(_PROJECT_ROOT / ".env")
 MICROSCOPY_DATA_DIR = os.environ.get("MICROSCOPY_ROOT", "./data")
 MLL23_DATA_DIR = os.environ.get("MLL23_DATA_DIR")
 
+VARIANT_CONFIG = {
+    "s": ("dinov2_vits14", 384),
+    "b": ("dinov2_vitb14", 768),
+    "l": ("dinov2_vitl14", 1024),
+    "g": ("dinov2_vitg14", 1536),
+}
 
 def parse_args() -> argparse.Namespace:
     """Parse and return command-line arguments."""
@@ -125,6 +131,13 @@ def parse_args() -> argparse.Namespace:
     tr.add_argument("--focal_gamma", type=float, default=2.0,
                     help="Focusing parameter gamma for Focal Loss.")
     tr.add_argument("--epochs", type=int, default=50)
+    tr.add_argument("--eval_only", action="store_true",
+                    help="Skip training entirely: run a single forward pass over the "
+                         "validation (and test, if --test_size > 0) split and report "
+                         "metrics. No optimizer/scheduler is built, so this also works "
+                         "when every parameter is frozen (e.g. --freeze_base "
+                         "--freeze_dino_head). --save_model has no effect here since "
+                         "the loaded checkpoint is never modified.")
     tr.add_argument("--save_model", action="store_true",
                     help="Save the best model checkpoint.")
     tr.add_argument("--save_backbone", action="store_true",
@@ -135,7 +148,7 @@ def parse_args() -> argparse.Namespace:
     # -- Classifier --------------------------------------------------------
     cl = parser.add_argument_group("Classifier")
     cl.add_argument("--classifier_network", type=str, default="resnet18",
-                    choices=["resnet18", "resnet34", "resnet50", "hybrid_vqc"],
+                    choices=["resnet18", "resnet34", "resnet50", "hybrid_vqc", "classical_dino", "hybrid_dino"],
                     help="Classifier architecture.")
     cl.add_argument("--classifier_pretrained", action="store_true",
                     help="Use pretrained ResNet backbone weights. If --backbone_weights "
@@ -154,6 +167,12 @@ def parse_args() -> argparse.Namespace:
                     help="Path to custom .pth ResNet backbone weights used when "
                          "--classifier_pretrained is enabled. If omitted, "
                          "--classifier_pretrained uses ImageNet weights.")
+    cl.add_argument("--dino_variant", choices=list(VARIANT_CONFIG), default="b",
+                        help="DinoBloom variant: s/b/l/g (default: b)")
+    cl.add_argument("--dino_hidden_dim", type=int, default=256,
+                        help="Hidden layer width for ClassicalDinoClassifier (default: 256)")
+    cl.add_argument("--dino_dropout", type=float, default=0.3,
+                        help="Dropout probability for ClassicalDinoClassifier (default: 0.3)")
 
     # -- Hybrid models ----------------------------------------------------
     hy = parser.add_argument_group("Hybrid models")
@@ -199,6 +218,37 @@ def parse_args() -> argparse.Namespace:
                          "same 3*n_qubits features at every layer. Adds no quantum "
                          "parameters; the angle map output grows by a factor of "
                          "--vqc_layers. No effect with --vqc_layers 1.")
+    hy.add_argument("--cache_dino_features", action="store_true",
+                    help="Pre-extract DinoBloom CLS embeddings for every image before training "
+                         "and serve them from RAM instead of re-running the ViT each batch. "
+                         "The cache is written to {data_dir}/.dino_feature_cache/ and reused "
+                         "across runs. Only valid when --dino_unfreeze_blocks 0 (frozen backbone).")
+    hy.add_argument("--dino_unfreeze_blocks", type=int, default=0,
+                    help="Number of trailing DinoBloom transformer blocks to unfreeze for "
+                         "fine-tuning (0 = fully frozen, max 12 for ViT-B). Unfrozen blocks "
+                         "are optimised at --lr; the VQC head uses --lr_head.")
+    hy.add_argument("--dino_model_weights", type=str, default=None,
+                    help="Path to a full hybrid_dino model checkpoint (best_model.pth) saved "
+                         "by --save_model on a previous run. Loaded with strict=False so "
+                         "q_proj is re-initialised when n_classes differs between runs.")
+    hy.add_argument("--freeze_base", action="store_true",
+                    help="Freeze the MLP angle_map (adapter hidden layer + angle-map output "
+                         "layer), VQC, and angle_scale after loading --dino_model_weights. "
+                         "Only q_norm and q_proj remain trainable, enabling lightweight "
+                         "fine-tuning of the classification head only.")
+    hy.add_argument("--freeze_dino_mlp_adapter", action="store_true",
+                    help="Freeze only the angle_map MLP (both linears -- adapter hidden layer "
+                         "+ angle-map output layer) after loading --dino_model_weights. "
+                         "angle_scale, the VQC, q_norm, and q_proj remain trainable -- use to "
+                         "retrain the VQC-onward stages on a new dataset while keeping the "
+                         "DinoBloom-facing adapter fixed. Mutually exclusive in effect with "
+                         "--freeze_base (which also freezes the VQC); do not combine the two.")
+    hy.add_argument("--freeze_dino_head", action="store_true",
+                    help="Freeze q_norm and q_proj after loading --dino_model_weights. "
+                         "Combined with --freeze_base, the entire classifier is "
+                         "frozen (backbone is already frozen by default) -- use with "
+                         "--eval_only for zero-shot evaluation of a fully pretrained "
+                         "checkpoint on a new dataset, with no fine-tuning at all.")
 
     # -- Adversarial -------------------------------------------------------
     parser.add_argument("--adv_parameters",
@@ -219,6 +269,8 @@ def parse_args() -> argparse.Namespace:
                          "and fold suffix are appended automatically.")
     wb.add_argument("--wandb_watch", action="store_true",
                     help="Enable wandb.watch() gradient tracking.")
+    wb.add_argument("--no_wandb", action="store_true",
+                    help="Disable W&B logging entirely (runs offline/disabled mode).")
 
     args = parser.parse_args()
     if args.n_qubits < 2:
@@ -243,7 +295,7 @@ def parse_args() -> argparse.Namespace:
     if args.backbone_weights and not args.classifier_pretrained:
         parser.error("--backbone_weights requires --classifier_pretrained.")
     if args.save_backbone and args.classifier_network not in (
-        "resnet18", "resnet34", "resnet50", "hybrid_vqc"
+        "resnet18", "resnet34", "resnet50", "hybrid_vqc", "hybrid_dino"
     ):
         parser.error("--save_backbone requires a ResNet-backed classifier.")
     if args.data_dir is None:
