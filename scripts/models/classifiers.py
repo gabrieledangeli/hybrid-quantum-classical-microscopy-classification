@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Dict, List, Mapping, Optional, Set
 
 import torch
@@ -65,16 +66,59 @@ def load_resnet_backbone_weights(model: ResNet, path: str) -> Dict[str, int]:
     }
 
 
+# Top-level child order of a torchvision ResNet (fc excluded). 
+# 
+# The hybrid stores the backbone as ``nn.Sequential(*list(m.children())[:-1])``, 
+# so its state-dict keys are index-based (``resnet.backbone.<idx>...``)
+# 
+# Map the param-bearing indices back to torchvision names so a hybrid-pretrained 
+# backbone can be saved in the same format that ``load_resnet_backbone_weights`` 
+# consumes.
 def extract_resnet_backbone_state_dict(model: nn.Module) -> Dict[str, torch.Tensor]:
-    """Extract only torchvision-style ResNet backbone tensors from ``model``."""
-    backbone_state = {
+    """
+    Extract torchvision-style ResNet backbone tensors from model.
+
+    Handles both plain ResNet classifiers (torchvision-named keys) and the hybrid
+    models, whose backbone lives in an index-keyed ``nn.Sequential`` and is
+    remapped here to torchvision names (conv1, bn1, layer1-4).
+    """
+    state = model.state_dict()
+
+    # Case 1: plain torchvision-named ResNet
+    direct = {
         key: value.detach().cpu().clone()
-        for key, value in model.state_dict().items()
+        for key, value in state.items()
         if _is_resnet_backbone_key(key)
     }
-    if not backbone_state:
-        raise ValueError("No ResNet backbone tensors were found in the model.")
-    return backbone_state
+    if direct:
+        return direct
+
+    # Case 2: hybrid model wrapping an index-keyed Sequential backbone.
+    hybrid_backbone_re = re.compile(r"(?:^|\.)resnet\.backbone\.(\d+)\.(.+)$")
+
+    seq_to_resnet = {
+        0: "conv1", 
+        1: "bn1", 
+        4: "layer1", 
+        5: "layer2", 
+        6: "layer3", 
+        7: "layer4"
+    }
+
+    remapped = {}
+    for key, value in state.items():
+        match = hybrid_backbone_re.search(key)
+        if match is None:
+            continue
+        name = seq_to_resnet.get(int(match.group(1)))
+        # ReLU/MaxPool/AvgPool carry no parameters
+        if name is None:
+            continue
+        remapped[f"{name}.{match.group(2)}"] = value.detach().cpu().clone()
+    if remapped:
+        return remapped
+
+    raise ValueError("No ResNet backbone tensors were found in the model.")
 
 
 def resnet_model(

@@ -41,7 +41,7 @@ from models.classifiers import (
     extract_resnet_backbone_state_dict,
     resnet_model,
 )
-from models.hybrid import hybrid_tn_model, hybrid_vqc_model, classical_dino_model, hybrid_dino_model, ClassicalDinoClassifier, load_dinobloom
+from models.hybrid import hybrid_vqc_model, classical_dino_model, hybrid_dino_model, ClassicalDinoClassifier, load_dinobloom
 from models.losses import FocalLoss
 from processing.numpy_pipeline import RawProcessingPipeline
 from processing.torch_pipeline import (
@@ -257,7 +257,8 @@ def _load_or_extract_features(
 
 
 def _build_classifier(args, n_classes: int):
-    """Instantiate classifier (pure ResNet, DinoBloom or hybrid TN)."""
+    """Instantiate classifier (pure ResNet, DinoBloom or hybrid VQC)."""
+    
     if args.classifier_network == "hybrid_dino":
         return hybrid_dino_model(
             fc_out_features=n_classes,
@@ -268,42 +269,33 @@ def _build_classifier(args, n_classes: int):
             vqc_dropout=args.vqc_dropout,
             unfreeze_blocks=args.dino_unfreeze_blocks,
             )
-
+    
     elif args.classifier_network == "classical_dino":
         return classical_dino_model(
             fc_out_features=n_classes,
             variant=args.dino_variant,
             device=DEVICE,
         )
-    if args.classifier_network == "hybrid_tn":
-        return hybrid_tn_model(
-            fc_out_features=n_classes,
-            n_qubits=args.n_qubits,
-            tn_bond_dim=args.tn_bond_dim,
-            tn_phys_dim=args.tn_phys_dim,
-            tn_hidden_dim=args.tn_hidden_dim,
-            ttn_leaves=args.ttn_leaves,
-            tn_bridge=args.tn_bridge,
-            vqc_layers=args.vqc_layers,
-            vqc_readout=args.vqc_readout,
-            vqc_dropout=args.vqc_dropout,
-            resnet_freeze_mode=args.resnet_freeze_mode,
-            backbone=args.backbone,
-            backbone_weights=args.backbone_weights,
-            pretrained=args.classifier_pretrained,
-        )
+      
     elif args.classifier_network == "hybrid_vqc":
         return hybrid_vqc_model(
             fc_out_features=n_classes,
             n_qubits=args.n_qubits,
             vqc_layers=args.vqc_layers,
             vqc_readout=args.vqc_readout,
-            vqc_dropout=args.vqc_dropout,
             resnet_freeze_mode=args.resnet_freeze_mode,
             backbone=args.backbone,
             backbone_weights=args.backbone_weights,
             pretrained=args.classifier_pretrained,
+            angle_map_type=args.vqc_angle_map,
+            angle_map_hidden_dim=args.vqc_angle_hidden_dim,
+            angle_map_dropout=args.vqc_angle_dropout,
+            vqc_entangler=args.vqc_entangler,
+            vqc_final_rotation=args.vqc_final_rotation,
+            vqc_blocks=args.vqc_blocks,
+            incremental_reuploading=args.incremental_reuploading,
         )
+      
     elif args.classifier_network in ("resnet18", "resnet34", "resnet50"):
         return resnet_model(
             fc_out_features=n_classes,
@@ -312,6 +304,7 @@ def _build_classifier(args, n_classes: int):
             backbone_weights=args.backbone_weights,
             resnet_freeze_mode=args.resnet_freeze_mode,
         )
+      
     else:
         raise ValueError(f"Unsupported classifier network: {args.classifier_network}.")
 
@@ -339,9 +332,24 @@ def _build_criterion(args, class_counts: Counter, n_classes: int, device: torch.
     return nn.CrossEntropyLoss(weight=weight, label_smoothing=args.label_smoothing)
 
 
+# Quantum-circuit parameters: rotation offsets and encoding scales live on
+# angle manifolds where L2 decay toward zero drives the circuit toward the
+# identity and shuts off the data encoding, so they are excluded from decay.
+_NO_DECAY_PARAM_NAMES = {
+    "thetas",
+    "feature_weights",
+    "entangle_weights",
+    "final_rot",
+    "angle_scale",
+}
+
+
 def _build_optimizer(args, model: nn.Module):
-    """Differential LR optimizer: backbone (low lr) vs head (high lr)."""
-    backbone_params, head_params = [], []
+    """Differential LR optimizer: backbone (low lr) vs head (high lr).
+
+    Quantum parameters train at the head LR but with weight_decay=0.
+    """
+    backbone_params, head_params, no_decay_params = [], [], []
 
     uses_pretrained_backbone = bool(args.classifier_pretrained)
 
@@ -358,7 +366,9 @@ def _build_optimizer(args, model: nn.Module):
         for name, p in model.named_parameters():
             if not p.requires_grad:
                 continue
-            if "resnet" in name or "backbone" in name:
+            if name.rsplit(".", 1)[-1] in _NO_DECAY_PARAM_NAMES:
+                no_decay_params.append(p)
+            elif "resnet" in name or "backbone" in name:
                 backbone_params.append(p)
             else:
                 head_params.append(p)
@@ -368,6 +378,8 @@ def _build_optimizer(args, model: nn.Module):
         groups.append({"params": backbone_params, "lr": args.lr})
     if head_params:
         groups.append({"params": head_params, "lr": args.lr_head})
+    if no_decay_params:
+        groups.append({"params": no_decay_params, "lr": args.lr_head, "weight_decay": 0.0})
     if not groups:
         raise ValueError("No trainable parameters found.")
 
@@ -413,10 +425,19 @@ def _make_base_run_name(args: argparse.Namespace, started_at: datetime) -> str:
         return f"{started_label}_{args.run_name}"
 
     model_tag = args.classifier_network
-    if args.classifier_network == "hybrid_tn":
-        model_tag = f"{args.classifier_network}-{args.backbone}-{args.tn_bridge}{args.n_qubits}"
-    elif args.classifier_network == "hybrid_vqc":
-        model_tag = f"{args.classifier_network}-{args.backbone}-q{args.n_qubits}"
+    if args.classifier_network == "hybrid_vqc":
+        model_tag = (
+            f"{args.classifier_network}-{args.backbone}-q{args.n_qubits}"
+            f"-{args.vqc_angle_map}map"
+        )
+        if args.vqc_blocks > 1:
+            model_tag += f"-b{args.vqc_blocks}"
+        if args.vqc_entangler != "cnot":
+            model_tag += f"-{args.vqc_entangler}"
+        if args.vqc_final_rotation:
+            model_tag += "-frot"
+        if args.incremental_reuploading:
+            model_tag += "-increup"
 
     return (
         f"{started_label}_{model_tag}"
@@ -726,8 +747,8 @@ def run_train(args: argparse.Namespace) -> None:
         raise ValueError(f"--non_rare_aug_prob must be in [0, 1], got {args.non_rare_aug_prob}")
     if not 0.0 <= args.undersample_strength <= 1.0:
         raise ValueError(f"--undersample_strength must be in [0, 1], got {args.undersample_strength}")
-    if not 0.0 <= args.vqc_dropout < 1.0:
-        raise ValueError(f"--vqc_dropout must be in [0, 1), got {args.vqc_dropout}")
+    if not 0.0 <= args.vqc_angle_dropout < 1.0:
+        raise ValueError(f"--vqc_angle_dropout must be in [0, 1), got {args.vqc_angle_dropout}")
     if not 0.0 <= args.test_size < 1.0:
         raise ValueError(f"--test_size must be in [0, 1), got {args.test_size}")
 
