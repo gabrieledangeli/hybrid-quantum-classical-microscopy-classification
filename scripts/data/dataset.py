@@ -7,6 +7,7 @@ from collections import Counter
 from typing import Any, Callable, List, Optional, Tuple
 
 import numpy as np
+import torch
 from PIL import Image
 from torch.utils.data import Dataset
 
@@ -79,6 +80,7 @@ def get_dataset(
         "Microscopy": MicroscopyDataset,
         "MicroscopyRGB": MicroscopyDatasetRGB,
         "MLL23": MLL23Dataset,
+        "MLL23Dino": MLL23DinoBloomDataset,
     }
     if name not in constructors:
         raise ValueError(f"Unknown dataset: '{name}'. Choose from {list(constructors)}.")
@@ -616,3 +618,44 @@ class MLL23Dataset(Dataset):
             return img / max_val
 
         return img / float(2 ** self.bits - 1)
+
+
+class MLL23DinoBloomDataset(MLL23Dataset):
+    """MLL23Dataset variant that feeds PIL (Python Image Library) images directly to the transform.
+
+    MLL23Dataset normally normalizes to float32 [0,1] before applying
+    transforms, which is incompatible with torchvision's Resize (expects PIL).
+    This subclass bypasses that normalization step.
+    """
+
+    def __getitem__(self, idx: int):
+        img = Image.open(self.images[idx]).convert("RGB")
+        if self.transform is not None:
+            img = self.transform(img)
+        return img, self.labels[idx]
+
+
+class CachedEmbeddingDataset(Dataset):
+    """In-memory dataset of pre-computed backbone embeddings.
+
+    Serves ``(feature_vector, label)`` pairs directly from a pre-computed
+    ``(N, embed_dim)`` tensor — no disk I/O during training.
+
+    Args:
+        features: Float32 tensor of shape ``(N, embed_dim)``.
+        labels:   Integer class label for each sample (list or 1-D tensor).
+    """
+
+    def __init__(self, features: torch.Tensor, labels: List[int]) -> None:
+        if features.shape[0] != len(labels):
+            raise ValueError(
+                f"features has {features.shape[0]} rows but labels has {len(labels)} entries."
+            )
+        self.features = features          # kept on CPU; DataLoader pins to GPU per batch
+        self.labels = list(labels)
+
+    def __len__(self) -> int:
+        return len(self.labels)
+
+    def __getitem__(self, idx: int) -> Tuple[Any, Any]:
+        return self.features[idx], self.labels[idx]

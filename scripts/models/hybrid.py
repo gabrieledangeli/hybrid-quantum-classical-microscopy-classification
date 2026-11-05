@@ -1,19 +1,31 @@
-"""Hybrid Quantum-Classical classifiers.
+"""Hybrid Tensor-Network + Variational Quantum Circuit classifier.
 
 Architecture:
     ResNet backbone -> angle map (MLP / linear) -> PennyLane VQC -> BN -> linear head
+    DinoBloom -> PennyLane VQC -> linear head
 """
 
 from __future__ import annotations
 
 import math
-from typing import Optional
+from typing import Dict, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+from huggingface_hub import hf_hub_download
 
 from .classifiers import _RESNET_REGISTRY, load_resnet_backbone_weights
 
+# -- DinoBloom Variant Definitions ------------------------------------------------------------
+VARIANT_CONFIG = {
+    "s": ("dinov2_vits14", 384),
+    "b": ("dinov2_vitb14", 768),
+    "l": ("dinov2_vitl14", 1024),
+    "g": ("dinov2_vitg14", 1536),
+}
+
+# -- Maths helpers ---------------------------------------------------------
 
 # -- Variational quantum layer ----------------------------------------------
 
@@ -562,6 +574,198 @@ class SimpleHybridVQCClassifier(nn.Module):
         return self.q_proj(self.q_norm(q_raw))
 
 
+class HybridDinoClassifier(nn.Module):
+    """DinoBloom (frozen) -> MLP Adapter Linear(embed_dim → hidden_dim) -> Angle Map linear(hidden_dim → vqc_layers * n_qubits) -> VQC -> BN -> linear.
+
+    embed_dim = 768 for variant B; 384 for variant S
+
+    The whole DinoBloom backbone is frozen by default, but the last ``unfreeze_blocks``
+    residual blocks can be unfrozen for fine-tuning.
+
+    Input:  ``(B, 3, 224, 224)``  Output: ``(B, n_classes)``
+    """
+
+    def __init__(
+        self,
+        n_classes: int,
+        variant: str = "b",
+        n_qubits: int = 10,
+        vqc_layers: int = 2,
+        vqc_readout: str = "z+zz",
+        vqc_dropout: float = 0.0,
+        unfreeze_blocks: int = 0,
+        backbone_weights: Optional[str] = None,
+        device: Optional[torch.device] = None,
+    ) -> None:
+        super().__init__()
+        if variant not in VARIANT_CONFIG:
+            raise ValueError(f"variant must be one of {list(VARIANT_CONFIG)}, got '{variant}'.")
+        if not 0.0 <= vqc_dropout < 1.0:
+            raise ValueError(f"vqc_dropout must be in [0, 1), got {vqc_dropout}.")
+        # if not 0.0 <= embed_dropout < 1.0:
+        #     raise ValueError(f"embed_dropout must be in [0, 1), got {embed_dropout}.")
+
+        self.n_classes = n_classes
+        self.n_qubits = n_qubits
+        self.unfreeze_blocks = unfreeze_blocks
+        self._base_frozen = False
+        self._dino_mlp_adapter_frozen = False
+        self._head_frozen = False
+        self.use_cached_features: bool = False  # set True after feature pre-extraction
+
+        self.backbone, embed_dim = load_dinobloom(variant, device or torch.device("cpu"))
+
+        if unfreeze_blocks > 0:
+            backbone_blocks = list(self.backbone.blocks)
+            n_total = len(backbone_blocks)
+            n_unfreeze = min(unfreeze_blocks, n_total)
+            for block in backbone_blocks[-n_unfreeze:]:
+                for p in block.parameters():
+                    p.requires_grad = True
+            for p in self.backbone.norm.parameters():
+                p.requires_grad = True
+            print(f"[DinoBloom] Unfrozen last {n_unfreeze}/{n_total} block(s) + norm.")
+
+        # self.angle_map = nn.Linear(embed_dim, n_qubits)
+        self.angle_map = nn.Sequential(
+            nn.Linear(embed_dim, _VQC_ANGLE_HIDDEN_DIM),
+            nn.GELU(),
+            nn.Dropout(p=_VQC_ANGLE_DROPOUT),
+            nn.Linear(_VQC_ANGLE_HIDDEN_DIM, vqc_layers * n_qubits),
+        )
+
+        self.angle_scale = nn.Parameter(torch.tensor(0.75 * math.pi))
+
+        self.quantum = VariationalQuantumLayer(n_qubits, vqc_layers, readout=vqc_readout)
+
+        readout_dim = self.quantum.readout_dim
+        self.q_norm = nn.BatchNorm1d(readout_dim)
+        self.q_dropout = nn.Dropout(p=vqc_dropout) if vqc_dropout > 0.0 else nn.Identity()
+        self.q_proj = nn.Linear(readout_dim, n_classes)
+
+    def forward(self, images: torch.Tensor) -> torch.Tensor:
+        # When use_cached_features=True, `images` is already the (B, embed_dim)
+        # embedding vector produced by the frozen backbone — skip it entirely.
+        feats = images if self.use_cached_features else self.backbone(images)  # (B, embed_dim)
+        q_in = torch.tanh(self.angle_map(feats)) * self.angle_scale            # (B, n_qubits)
+        q_out = self.q_dropout(self.q_norm(self.quantum(q_in)))                # (B, readout_dim)
+        return self.q_proj(q_out)                                               # (B, n_classes)
+
+    def freeze_base(self) -> None:
+        """Freeze angle_map (adapter MLP + angle-map output layer), quantum
+        circuit, and angle_scale; leave q_norm + q_proj trainable."""
+        for p in self.angle_map.parameters():
+            p.requires_grad = False
+        for p in self.quantum.parameters():
+            p.requires_grad = False
+        self.angle_scale.requires_grad = False
+        self._base_frozen = True
+        print("[HybridDinoClassifier] Base (angle_map + quantum + angle_scale) frozen.")
+
+    def freeze_dino_mlp_adapter(self) -> None:
+        """Freeze only the angle_map MLP (the MLL23-trained hidden and
+        output linears -- adapter hidden layer + angle-map output layer).
+        Leaves angle_scale, quantum (VQC), q_norm, and q_proj trainable --
+        for retraining the VQC-onward stages on a new dataset while keeping
+        the DinoBloom-facing adapter fixed."""
+        for p in self.angle_map.parameters():
+            p.requires_grad = False
+        self._dino_mlp_adapter_frozen = True
+        print("[HybridDinoClassifier] DinoBloom MLP adapter (angle_map) frozen.")
+
+    def freeze_head(self) -> None:
+        """Freeze q_norm + q_proj. Combined with ``freeze_base``, the whole
+        classifier (backbone included) is frozen -- suitable for zero-shot
+        evaluation of a fully pretrained checkpoint on a new dataset."""
+        for p in self.q_norm.parameters():
+            p.requires_grad = False
+        for p in self.q_proj.parameters():
+            p.requires_grad = False
+        self._head_frozen = True
+        print("[HybridDinoClassifier] Head (q_norm + q_proj) frozen.")
+
+    def train(self, mode: bool = True) -> "HybridDinoClassifier":
+        super().train(mode)
+        if self.unfreeze_blocks == 0:
+            self.backbone.eval()
+        if self._base_frozen:
+            self.angle_map.eval()
+            self.quantum.eval()
+        elif self._dino_mlp_adapter_frozen:
+            self.angle_map.eval()  # keep Dropout inside the frozen MLP deterministic
+        if self._head_frozen:
+            self.q_norm.eval()  # keep BatchNorm running stats fixed, not batch-recomputed
+        return self
+
+
+class ClassicalDinoClassifier(nn.Module):
+    """DinoBloom (frozen) + L2-regularised linear probe.
+
+    Training is a one-shot sklearn fit, not gradient descent.
+    
+    C = n_classes * n_train / 100  (no feature scaling applied).
+
+    Input: ``(B, 3, 224, 224)``   Output: ``(B, n_classes)``
+    """
+
+    def __init__(
+        self,
+        n_classes: int,
+        variant: str = "b",
+        device: Optional[torch.device] = None,
+    ) -> None:
+        super().__init__()
+        if variant not in VARIANT_CONFIG:
+            raise ValueError(f"variant must be one of {list(VARIANT_CONFIG)}, got '{variant}'.")
+
+        self.n_classes = n_classes
+        self.backbone, embed_dim = load_dinobloom(variant, device or torch.device("cpu"))
+        self.head = nn.Linear(embed_dim, n_classes)
+        self._fitted = False
+
+    # -- Fitting -----------------------------------------------------------
+
+    def fit(self, X_train: "np.ndarray", y_train: "np.ndarray") -> None:
+        """Fit LogisticRegression on pre-extracted CLS-token features and
+        copy the weights into ``self.head``.
+
+        Parameters
+        ----------
+        X_train : ndarray (N, embed_dim)  CLS-token feature matrix.
+        y_train : ndarray (N,)            Integer class labels.
+        """
+        import numpy as np
+        from sklearn.linear_model import LogisticRegression
+
+        n_train = len(X_train)
+        C = self.n_classes * n_train / 100.0
+        clf = LogisticRegression(
+            C=C, penalty="l2", solver="lbfgs", max_iter=1000,
+        )
+        clf.fit(X_train, y_train)
+        print(f"[ClassicalDino] LogReg fitted on {n_train} samples, C={C:.3f}")
+
+        with torch.no_grad():
+            self.head.weight.copy_(torch.from_numpy(clf.coef_.astype(np.float32)))
+            self.head.bias.copy_(torch.from_numpy(clf.intercept_.astype(np.float32)))
+
+        self._fitted = True
+
+    # -- Inference ---------------------------------------------------------
+
+    def forward(self, images: torch.Tensor) -> torch.Tensor:
+        if not self._fitted:
+            raise RuntimeError("Call fit(X_train, y_train) before forward().")
+        feats = self.backbone(images)   # (B, embed_dim), no grad
+        return self.head(feats)         # (B, n_classes)
+
+    def train(self, mode: bool = True) -> "ClassicalDinoClassifier":
+        super().train(mode)
+        self.backbone.eval()
+        return self
+        
+
+
 # -- Convenience factory --------------------------------------------------
 
 
@@ -600,3 +804,69 @@ def hybrid_vqc_model(
         vqc_blocks=vqc_blocks,
         incremental_reuploading=incremental_reuploading,
     )
+
+
+def hybrid_dino_model(
+    fc_out_features: int,
+    variant: str = "b",
+    n_qubits: int = 10,
+    vqc_layers: int = 2,
+    vqc_readout: str = "z+zz",
+    vqc_dropout: float = 0.0,
+    unfreeze_blocks: int = 0,
+    backbone_weights: Optional[str] = None,
+    # embed_dropout: float = 0.0,
+    device: Optional[torch.device] = None,
+) -> HybridDinoClassifier:
+    """Factory for `HybridDinoClassifier`."""
+    return HybridDinoClassifier(
+        n_classes=fc_out_features,
+        variant=variant,
+        n_qubits=n_qubits,
+        vqc_layers=vqc_layers,
+        vqc_readout=vqc_readout,
+        vqc_dropout=vqc_dropout,
+        unfreeze_blocks=unfreeze_blocks,
+        backbone_weights=backbone_weights,
+        # embed_dropout=embed_dropout,
+        device=device,
+    )
+
+def classical_dino_model(
+    fc_out_features: int,
+    variant: str = "b",
+    device: Optional[torch.device] = None,
+) -> ClassicalDinoClassifier:
+    """Factory for `ClassicalDinoClassifier`."""
+    return ClassicalDinoClassifier(
+        n_classes=fc_out_features,
+        variant=variant,
+        device=device,
+    )
+
+
+def load_dinobloom(variant: str, device: torch.device) -> tuple[nn.Module, int]:
+    dinov2_model, embed_dim = VARIANT_CONFIG[variant]
+
+    print(f"[DinoBloom] Loading base Dinov2 model: {dinov2_model}")
+    backbone = torch.hub.load("facebookresearch/dinov2", dinov2_model, verbose=False)
+
+    print(f"[DinoBloom] Downloading weights for variant '{variant}'...")
+    ckpt_path = hf_hub_download(
+        repo_id="MarrLab/DinoBloom",
+        filename=f"pytorch_model_{variant}.bin",
+    )
+    ckpt = torch.load(ckpt_path, map_location="cpu")
+
+    # pos_embed is the one parameter whose shape differs from the hub default;
+    # resize it (zeros are placeholders, overwritten by load_state_dict).
+    num_tokens = int(1 + (224 / 14) ** 2)                                       # the +1 is the CLS vector token
+    backbone.pos_embed = nn.Parameter(torch.zeros(1, num_tokens, embed_dim))    # replaces original pos_embed with a correctly shaped (1, 257, embed_dim) tensor
+    backbone.load_state_dict(ckpt, strict=True)                                 # zeros get overwritten here
+
+    backbone.eval()
+    for p in backbone.parameters():
+        p.requires_grad = False         # no weight updates
+
+    print(f"[DinoBloom] Backbone frozen. embed_dim={embed_dim}")
+    return backbone, embed_dim
