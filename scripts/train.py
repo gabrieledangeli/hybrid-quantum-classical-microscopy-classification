@@ -1,8 +1,8 @@
 """Training entry-point for the Hybrid Quantum-Classical CNN pipeline.
 
-Usage from the `scripts/` directory:
+Usage from the repository root:
 
-    python train.py --dataset Microscopy --data_dir ./data --epochs 30
+    python scripts/train.py --dataset MicroscopyRGB --data_dir ./data --epochs 30
 """
 
 from __future__ import annotations
@@ -43,12 +43,6 @@ from models.classifiers import (
 )
 from models.hybrid import hybrid_vqc_model, classical_dino_model, hybrid_dino_model, ClassicalDinoClassifier, load_dinobloom
 from models.losses import FocalLoss
-from processing.numpy_pipeline import RawProcessingPipeline
-from processing.torch_pipeline import (
-    NNProcessing,
-    ParametrizedProcessing,
-    RawToRGB,
-)
 from utils.metrics import compute_metrics
 
 # Keep every W&B run cache in a single <project_root>/wandb folder
@@ -142,43 +136,16 @@ def get_dinobloom_transform() -> T.Compose:
         T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
     ])
 
-def _build_processor(args, dataset):
-    """Return ``(processor, normalization)`` based on CLI flags.
-    
-    For DinoBloom, transformation it baked into MLL23DinoBloomDataset already."""
-    
+def _build_normalization(args, dataset):
+    """Set the RGB input transform and return model-side channel normalisation."""
+
     if args.classifier_network in ("classical_dino", "hybrid_dino"):
         dataset.transform = get_dinobloom_transform()
-        return None, None
-    
-    is_rgb = args.dataset in ("MicroscopyRGB", "MLL23") or getattr(dataset, "is_rgb", False)
+        return None
 
-    if is_rgb:
-        dataset.transform = T.ToTensor()
-        dataset.clear_cache()
-        return None, TensorNormalize(dataset.dataset_mean, dataset.dataset_std)
-
-    if args.processing_mode == "static":
-        dataset.transform = T.Compose([
-            RawProcessingPipeline(
-                camera_parameters=dataset.camera_parameters,
-                debayer=args.sp_debayer,
-                sharpening=args.sp_sharpening,
-                denoising=args.sp_denoising,
-            ),
-        ])
-        dataset.clear_cache()
-        return None, TensorNormalize(dataset.dataset_mean, dataset.dataset_std)
-
-    mosaic_norm = TensorNormalize([0.5663, 0.1401, 0.0731], [0.097, 0.0423, 0.008])
-    # TODO: Study the implementation of these parametrized processing modules.
-    if args.processing_mode == "parametrized":
-        return ParametrizedProcessing(camera_parameters=dataset.camera_parameters, batch_norm_output=True), None
-    if args.processing_mode == "neural_network":
-        return NNProcessing(batch_norm_output=True), mosaic_norm
-    # "none"
-    # TODO: Study whether this minimal RawToRGB path is a useful baseline.
-    return RawToRGB(reduce_size=True, out_channels=3), mosaic_norm
+    dataset.transform = T.ToTensor()
+    dataset.clear_cache()
+    return TensorNormalize(dataset.dataset_mean, dataset.dataset_std)
 
 
 def _load_or_extract_features(
@@ -358,8 +325,6 @@ def _build_optimizer(args, model: nn.Module):
             if not p.requires_grad:
                 continue
             (head_params if name.startswith("fc.") else backbone_params).append(p)
-        if model.processor is not None:
-            head_params.extend(p for p in model.processor.parameters() if p.requires_grad)
     elif args.classifier_network in ("resnet18", "resnet34", "resnet50"):
         head_params = [p for p in model.parameters() if p.requires_grad]
     else:
@@ -456,7 +421,6 @@ def _make_run_dir(args: argparse.Namespace, base_run_name: str, fold: int) -> st
     return os.path.join(
         "results",
         args.dataset,
-        args.processing_mode,
         base_run_name,
         f"fold_{fold + 1}",
     )
@@ -475,7 +439,6 @@ def _make_backbone_metadata(
         "created_at": datetime.now().strftime("%d-%m-%Y_%H-%M"),
         "selection_metric": "val_macro_f1",
         "dataset": args.dataset,
-        "processing_mode": args.processing_mode,
         "classifier_network": args.classifier_network,
         "fold": fold + 1,
         "epoch": epoch,
@@ -828,13 +791,13 @@ def run_train(args: argparse.Namespace) -> None:
         print(sep)
 
         # -- Build pipeline components -------------------------------------
-        processor, normalization = _build_processor(args, dataset)
+        normalization = _build_normalization(args, dataset)
         classifier = _build_classifier(args, n_classes)
 
         augmentation = get_augmentation(args.augmentation)
         # Image-space augmentation is not applicable for DinoBloom classifiers:
         # the backbone expects un-augmented, standardised 224×224 crops, and with
-        # feature caching the pipeline never sees raw pixels during training.
+        # feature caching the pipeline never sees image pixels during training.
         if args.classifier_network in ("classical_dino", "hybrid_dino") and augmentation is not None:
             print("[DinoBloom] Image augmentation disabled (not applicable for frozen-ViT pipeline).")
             augmentation = None
@@ -846,12 +809,10 @@ def run_train(args: argparse.Namespace) -> None:
 
         model = EndToEndModel(
             classifier=classifier, 
-            processor=processor,
             normalization=normalization, 
             augmentation=augmentation,
             augmentation_target_classes=aug_targets,
             non_target_augmentation_prob=non_target_prob,
-            freeze_processor=args.freeze_processor,
         ).to(DEVICE)
 
         # Dataloaders

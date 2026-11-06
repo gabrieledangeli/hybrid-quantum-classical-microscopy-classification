@@ -6,11 +6,8 @@ tqdm>=4.65
 scikit-learn>=1.3
 python-dotenv>=1.0
 
-# -- Image I/O & processing ----------------------------------------------
+# -- Image I/O & plotting ------------------------------------------------
 tifffile>=2023.7
-scipy>=1.11
-scikit-image>=0.21
-colour-demosaicing>=0.2
 matplotlib>=3.7
 Pillow>=9.5
 

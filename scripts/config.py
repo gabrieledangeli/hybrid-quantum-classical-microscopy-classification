@@ -28,12 +28,12 @@ def parse_args() -> argparse.Namespace:
 
     # -- Dataset -----------------------------------------------------------
     ds = parser.add_argument_group("Dataset")
-    ds.add_argument("--dataset", type=str, default="Microscopy",
-                    choices=["Microscopy", "MicroscopyRGB", "MLL23"],
-                    help="Dataset variant.")
+    ds.add_argument("--dataset", type=str, default="MicroscopyRGB",
+                    choices=["MicroscopyRGB", "MLL23"],
+                    help="RGB image dataset.")
     ds.add_argument("--data_dir", type=str, default=None,
-                    help="Path to the dataset root directory. If omitted, Microscopy "
-                         "datasets use MICROSCOPY_ROOT from .env or './data', while "
+                    help="Path to the dataset root directory. If omitted, MicroscopyRGB "
+                         "uses MICROSCOPY_ROOT from .env or './data', while "
                          "MLL23 uses MLL23_DATA_DIR from .env.")
     ds.add_argument("--num_workers", type=int, default=4,
                     help="DataLoader worker processes.")
@@ -82,23 +82,6 @@ def parse_args() -> argparse.Namespace:
                     help="Sampler mode when imbalance_handling uses sampler.")
     ib.add_argument("--undersample_strength", type=float, default=0.7,
                     help="Maximum soft-undersampling strength [0, 1].")
-
-    # -- Processing --------------------------------------------------------
-    pr = parser.add_argument_group("Image processing")
-    pr.add_argument("--processing_mode", type=str, default="static",
-                    choices=["parametrized", "static", "neural_network", "none"],
-                    help="RAW-to-RGB processing mode (Mandatory for Raw images).")
-    pr.add_argument("--sp_debayer", type=str, default="bilinear",
-                    choices=["bilinear", "malvar2004", "menon2007"],
-                    help="Demosaicing algorithm.")
-    pr.add_argument("--sp_sharpening", type=str, default="unsharp_masking",
-                    choices=["sharpening_filter", "unsharp_masking"],
-                    help="Sharpening algorithm.")
-    pr.add_argument("--sp_denoising", type=str, default="gaussian_denoising",
-                    choices=["gaussian_denoising", "median_denoising"],
-                    help="Denoising algorithm.")
-    pr.add_argument("--freeze_processor", action="store_true",
-                    help="Freeze processor weights.")
 
     # -- Augmentation ------------------------------------------------------
     ag = parser.add_argument_group("Augmentation")
@@ -249,14 +232,6 @@ def parse_args() -> argparse.Namespace:
                          "frozen (backbone is already frozen by default) -- use with "
                          "--eval_only for zero-shot evaluation of a fully pretrained "
                          "checkpoint on a new dataset, with no fine-tuning at all.")
-
-    # -- Adversarial -------------------------------------------------------
-    parser.add_argument("--adv_parameters",
-                        choices=["all", "black_level", "white_balance",
-                                 "colour_correction", "gamma_correct",
-                                 "sharpening_filter", "gaussian_blur",
-                                 "additive_layer"],
-                        help="Target parameters for adversarial training.")
 
     # -- Weights & Biases -------------------------------------------------
     wb = parser.add_argument_group("Weights & Biases")

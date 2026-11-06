@@ -184,7 +184,7 @@ def resnet_model(
 
 
 class EndToEndModel(nn.Module):
-    """Pipeline wrapper: *processor -> augmentation -> normalisation -> classifier*.
+    """RGB pipeline wrapper: *augmentation -> normalisation -> classifier*.
 
     When *conditional augmentation* is enabled, samples whose labels belong to
     ``augmentation_target_classes`` are eligible for the augmentation pipeline,
@@ -196,33 +196,23 @@ class EndToEndModel(nn.Module):
     def __init__(
         self,
         classifier: nn.Module,
-        processor: Optional[nn.Module] = None,
         normalization: Optional[nn.Module] = None,
         augmentation: Optional[nn.Module] = None,
         augmentation_target_classes: Optional[List[int]] = None,
         non_target_augmentation_prob: float = 1.0,
-        freeze_processor: bool = False,
     ) -> None:
         super().__init__()
         self.classifier = classifier
-        self.processor = processor
         self.normalization = normalization
         self.augmentation = augmentation
         self.augmentation_target_classes: Optional[Set[int]] = (
             set(augmentation_target_classes) if augmentation_target_classes is not None else None
         )
         self.non_target_augmentation_prob = float(non_target_augmentation_prob)
-        self.freeze_processor = freeze_processor
-
-        if freeze_processor and self.processor is not None:
-            _freeze(self.processor)
 
     # -- Forward -----------------------------------------------------------
 
     def forward(self, x: torch.Tensor, labels: Optional[torch.Tensor] = None) -> torch.Tensor:
-        if self.processor is not None:
-            x = self.processor(x)
-
         if self.augmentation is not None and self.training:
             x = self._apply_augmentation(x, labels)
 
@@ -276,11 +266,3 @@ class TensorNormalize(nn.Module):
         if x.ndim == 4:
             return (x - self.mean) / self.std
         raise ValueError(f"Expected 3-D or 4-D tensor, got {x.ndim}-D.")
-
-
-# -- Utilities -------------------------------------------------------------
-
-
-def _freeze(module: nn.Module) -> None:
-    for p in module.parameters():
-        p.requires_grad = False

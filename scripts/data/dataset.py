@@ -1,4 +1,4 @@
-"""Microscopy dataset classes for RAW and RGB images."""
+"""RGB microscopy datasets and subset helpers."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ import torch
 from PIL import Image
 from torch.utils.data import Dataset
 
-from .utils import list_images_in_dir, load_image
+from .utils import load_image
 
 # -- Constants ----------------------------------------------------------------
 
@@ -68,7 +68,6 @@ MLL23_DISPLAY_NAMES = {
 def get_dataset(
     name: str,
     root_dir: str,
-    intensity_ratio: float = 1.0,
     min_samples_per_class: int = 15,  # Default 15 keeps >= 10 train samples with the default 5-fold CV or 70/30 shuffle split.
     exclude_classes: Optional[List[str]] = None,
     below_threshold_strategy: str = "drop",
@@ -77,7 +76,6 @@ def get_dataset(
 ) -> Dataset:
     """Instantiate the requested dataset variant."""
     constructors = {
-        "Microscopy": MicroscopyDataset,
         "MicroscopyRGB": MicroscopyDatasetRGB,
         "MLL23": MLL23Dataset,
         "MLL23Dino": MLL23DinoBloomDataset,
@@ -87,79 +85,12 @@ def get_dataset(
 
     return constructors[name](
         root_dir=root_dir,
-        intensity_ratio=intensity_ratio,
         min_samples_per_class=min_samples_per_class,
         exclude_classes=exclude_classes,
         below_threshold_strategy=below_threshold_strategy,
         rare_class_name=rare_class_name,
         missing_image_policy=missing_image_policy,
     )
-
-
-# -- Base dataset -------------------------------------------------------------
-
-
-class ImageFolderDataset(Dataset):
-    """Generic image-folder dataset.
-
-    Args:
-        img_dir: Path to the image directory.
-        labels: Per-image label list.
-        transform: Optional transform applied to each image.
-        bits: Bit depth used for normalisation (divides by ``2**bits - 1``).
-    """
-
-    task = "classification"
-
-    def __init__(
-        self,
-        img_dir: str,
-        labels: List[Any],
-        transform: Optional[Callable] = None,
-        bits: int = 8,
-    ) -> None:
-        self.img_dir = img_dir
-        self.labels = labels
-        self.transform = transform
-        self.bits = bits
-
-        self.images = list_images_in_dir(img_dir)
-        if len(self.images) != len(self.labels):
-            raise ValueError(
-                f"Image count ({len(self.images)}) != label count ({len(self.labels)})."
-            )
-
-    def __repr__(self) -> str:
-        lines = [f"{type(self).__name__}[{len(self.images)} images]"]
-        for i, (img, lbl) in enumerate(zip(self.images, self.labels)):
-            if i >= 10:
-                lines.append("...")
-                break
-            lines.append(f"  {img}  ->  {lbl}")
-        return "\n".join(lines)
-
-    def __len__(self) -> int:
-        return len(self.images)
-
-    def _normalize_image(self, img: np.ndarray) -> np.ndarray:
-        img = img.astype(np.float32, copy=False)
-        return img / float(2 ** self.bits - 1)
-
-    def __getitem__(self, idx: int) -> Tuple[Any, Any]:
-        img = load_image(self.images[idx])
-        img = self._normalize_image(img)
-        if self.transform is not None:
-            img = self.transform(img)
-        return img, self.labels[idx]
-
-    def clear_cache(self) -> None:
-        """No-op compatibility hook.
-
-        Caching is intentionally disabled to avoid unbounded RAM growth with
-        large TIFF datasets, but callers can still safely invalidate the
-        dataset after mutating ``self.transform``.
-        """
-        return None
 
 
 # -- Subset -------------------------------------------------------------------
@@ -191,37 +122,21 @@ class Subset(Dataset):
         return x, y
 
 
-# -- Microscopy RAW dataset ---------------------------------------------------
+# -- Microscopy RGB dataset ---------------------------------------------------
 
 
-class MicroscopyDataset(ImageFolderDataset):
-    """Microscopy dataset for RAW Bayer-pattern images.
+class MicroscopyDatasetRGB(Dataset):
+    """Annotated RGB TIFF images from ``images/rgb_scale100``.
 
-    Camera parameters and normalisation statistics are dataset-level constants
-    used by the image-processing pipeline and model normalisation layer.
-
-    Subclasses (e.g. MicroscopyDatasetRGB) only need to override the
-    class-level attributes ``_IMAGE_EXTENSIONS`` and ``_IMAGE_DIR_PREFIX``,
-    plus any colour/bit-depth specific normalisation.
+    Image filenames are matched to stems in ``labels/Ma190c_annotations.dat``.
+    Filtering preserves annotation order. Integer images are scaled by their
+    dtype maximum; floating-point images above one are scaled by their maximum.
     """
 
-    # Subclass-overridable knobs
-    _IMAGE_EXTENSIONS: Tuple[str, ...] = (".tiff",)
-    _IMAGE_DIR_PREFIX: str = "raw_scale"
-
-    # Camera intrinsics
-    # TODO: Verify these camera parameters, especially the negative white-balance value.
-    black_level = [9.834368023181512e-06] * 4
-    white_balance = [-0.6567, 1.9673, 3.5304]
-    colour_matrix = [
-        -2.0338,  0.0933,  0.4157,
-        -0.0286,  2.6464, -0.0574,
-        -0.5516, -0.0947,  2.9308,
-    ]
-    camera_parameters = (black_level, white_balance, colour_matrix)
-
-    dataset_mean = [0.91, 0.83, 0.94]
-    dataset_std = [0.08, 0.13, 0.05]
+    task = "classification"
+    _IMAGE_EXTENSIONS: Tuple[str, ...] = (".tiff", ".tif")
+    dataset_mean = [0.5566, 0.4607, 0.5923]
+    dataset_std = [0.0983, 0.1417, 0.0667]
 
     # Stems known to be corrupted (extension-agnostic).
     _INVALID_STEMS = frozenset({"Ma190c_lame3_zone13_composite_Mcropped_2"})
@@ -229,17 +144,14 @@ class MicroscopyDataset(ImageFolderDataset):
     def __init__(
         self,
         root_dir: str,
-        intensity_ratio: float = 1.0,
         transform: Optional[Callable] = None,
         bits: int = 16,
-        min_samples_per_class: int = 15,  # Default 15 keeps >= 10 train samples with the default 3-fold CV or 70/30 shuffle split.
+        min_samples_per_class: int = 15,
         exclude_classes: Optional[List[str]] = None,
         below_threshold_strategy: str = "drop",
         rare_class_name: str = "RARE",
         missing_image_policy: str = "error",
     ) -> None:
-        if intensity_ratio != 1.0:
-            raise ValueError("Only intensity_ratio=1.0 is supported for RAW images.")
         if min_samples_per_class < 1:
             raise ValueError(f"min_samples_per_class must be >= 1, got {min_samples_per_class}")
         if below_threshold_strategy not in ("drop", "merge_to_rare"):
@@ -248,9 +160,7 @@ class MicroscopyDataset(ImageFolderDataset):
             raise ValueError(f"Unknown missing image policy: '{missing_image_policy}'.")
 
         self.root_dir = root_dir
-        self.img_dir = os.path.join(
-            root_dir, "images", f"{self._IMAGE_DIR_PREFIX}{int(intensity_ratio * 100):03d}"
-        )
+        self.img_dir = os.path.join(root_dir, "images", "rgb_scale100")
         self.min_samples_per_class = min_samples_per_class
         self.requested_excluded_classes = sorted(
             {cls.strip() for cls in (exclude_classes or []) if cls.strip()}
@@ -266,9 +176,9 @@ class MicroscopyDataset(ImageFolderDataset):
         if not os.path.isfile(label_file):
             raise FileNotFoundError(f"Label file not found: {label_file}")
 
-        stems, class_labels_raw = self._read_label_file(label_file)
+        stems, annotation_labels = self._read_label_file(label_file)
 
-        label_counts = Counter(class_labels_raw)
+        label_counts = Counter(annotation_labels)
         self.excluded_classes = [
             c for c in self.requested_excluded_classes if label_counts.get(c, 0) > 0
         ]
@@ -295,11 +205,11 @@ class MicroscopyDataset(ImageFolderDataset):
         self.merged_classes = sorted(low_count) if below_threshold_strategy == "merge_to_rare" else []
         self.original_to_mapped_class = dict(class_mapping)
 
-        # Resolve actual on-disk paths (handles subclass-specific extensions)
+        # Resolve actual on-disk paths for supported TIFF extensions
         # and optionally drop missing-image annotations.
         filtered: List[Tuple[str, str]] = []
         missing_samples: List[Tuple[str, str]] = []
-        for stem, cls in zip(stems, class_labels_raw):
+        for stem, cls in zip(stems, annotation_labels):
             if (
                 cls in self.requested_excluded_classes
                 or cls not in selected_classes
@@ -343,10 +253,33 @@ class MicroscopyDataset(ImageFolderDataset):
         self.transform = transform
         self.bits = bits
 
+    def __repr__(self) -> str:
+        lines = [f"{type(self).__name__}[{len(self.images)} images]"]
+        for i, (img, lbl) in enumerate(zip(self.images, self.labels)):
+            if i >= 10:
+                lines.append("...")
+                break
+            lines.append(f"  {img}  ->  {lbl}")
+        return "\n".join(lines)
+
+    def __len__(self) -> int:
+        return len(self.images)
+
+    def __getitem__(self, idx: int) -> Tuple[Any, Any]:
+        img = load_image(self.images[idx])
+        img = self._normalize_image(img)
+        if self.transform is not None:
+            img = self.transform(img)
+        return img, self.labels[idx]
+
+    def clear_cache(self) -> None:
+        """No-op hook: images are read on demand without an in-memory cache."""
+        return None
+
     # -- Private helpers ------------------------------------------------------
 
     def _resolve_image_path(self, stem: str) -> Optional[str]:
-        """Return the on-disk path for ``stem`` honouring subclass extensions."""
+        """Return the on-disk path for ``stem`` using supported TIFF extensions."""
         for ext in self._IMAGE_EXTENSIONS:
             path = os.path.join(self.img_dir, f"{stem}{ext}")
             if os.path.isfile(path):
@@ -368,49 +301,6 @@ class MicroscopyDataset(ImageFolderDataset):
                 labels.append(cls)
         return stems, labels
 
-
-# -- Microscopy RGB dataset ---------------------------------------------------
-
-
-class MicroscopyDatasetRGB(MicroscopyDataset):
-    """Microscopy dataset for pre-processed **RGB** images.
-
-    Inherits the RAW dataset's filtering/splitting logic; the only differences
-    are the on-disk directory, the supported file extensions (TIFF/TIF/PNG)
-    and the per-channel normalisation statistics.
-    """
-
-    _IMAGE_EXTENSIONS = (".tiff", ".tif")
-    _IMAGE_DIR_PREFIX = "rgb_scale"
-
-    camera_parameters = None  
-    dataset_mean = [0.5566, 0.4607, 0.5923]
-    dataset_std = [0.0983, 0.1417, 0.0667]
-
-    def __init__(
-        self,
-        root_dir: str,
-        intensity_ratio: float = 1.0,
-        transform: Optional[Callable] = None,
-        bits: int = 16,
-        min_samples_per_class: int = 15,
-        exclude_classes: Optional[List[str]] = None,
-        below_threshold_strategy: str = "drop",
-        rare_class_name: str = "RARE",
-        missing_image_policy: str = "error",
-    ) -> None:
-        super().__init__(
-            root_dir=root_dir,
-            intensity_ratio=intensity_ratio,
-            transform=transform,
-            bits=bits,
-            min_samples_per_class=min_samples_per_class,
-            exclude_classes=exclude_classes,
-            below_threshold_strategy=below_threshold_strategy,
-            rare_class_name=rare_class_name,
-            missing_image_policy=missing_image_policy,
-        )
-
     def _normalize_image(self, img: np.ndarray) -> np.ndarray:
         source_dtype = img.dtype
         img = img.astype(np.float32, copy=False)
@@ -424,7 +314,7 @@ class MicroscopyDatasetRGB(MicroscopyDataset):
                 return img
             return img / max_val
 
-        return super()._normalize_image(img)
+        return img / float(2 ** self.bits - 1)
 
 
 # -- MLL23 RGB image-folder dataset ---------------------------------------
@@ -447,7 +337,6 @@ class MLL23Dataset(Dataset):
 
     _IMAGE_EXTENSIONS: Tuple[str, ...] = (".tif", ".tiff")
 
-    camera_parameters = None 
     dataset_mean = [0.7551, 0.6655, 0.7923]
     dataset_std = [0.1992, 0.2667, 0.1737]
     is_rgb = True
@@ -455,7 +344,6 @@ class MLL23Dataset(Dataset):
     def __init__(
         self,
         root_dir: str,
-        intensity_ratio: float = 1.0,
         transform: Optional[Callable] = None,
         bits: int = 8,
         min_samples_per_class: int = 15,
@@ -464,12 +352,6 @@ class MLL23Dataset(Dataset):
         rare_class_name: str = "RARE",
         missing_image_policy: str = "error",
     ) -> None:
-        # Kept for get_dataset() compatibility; MLL23 has no scale-specific folders.
-        if intensity_ratio != 1.0:
-            raise ValueError(
-                "MLL23Dataset does not use intensity_ratio because images are read "
-                f"directly from class folders; expected 1.0, got {intensity_ratio}."
-            )
         if min_samples_per_class < 1:
             raise ValueError(f"min_samples_per_class must be >= 1, got {min_samples_per_class}")
         if below_threshold_strategy not in ("drop", "merge_to_rare"):

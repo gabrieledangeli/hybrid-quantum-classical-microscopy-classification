@@ -148,7 +148,7 @@ class BatchedAugmentation(nn.Module):
 
         if self._uses_intensity_augmentation():
             # TODO: Clamp only intensity-augmented samples when apply_mask is used,
-            # especially for processor outputs that are not guaranteed to be in [0, 1].
+            # so ineligible RGB images remain unchanged even outside [0, 1].
             x = x.clamp(0.0, 1.0)
 
         if single:
