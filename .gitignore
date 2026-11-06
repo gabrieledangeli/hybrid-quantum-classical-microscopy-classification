@@ -8,10 +8,8 @@ build/
 *.egg
 
 # -- Virtual environments -------------------------------------------------
-.venv/
 .env
 venv/
-env/
 
 # -- Jupyter --------------------------------------------------------------
 .ipynb_checkpoints/
@@ -45,18 +43,8 @@ pennylane/
 
 # -- Temporary / generated ------------------------------------------------
 *.zip
-tmpclaude*
 debug*
 
-# -- AI agent files (Claude Code, OpenAI Codex, Cursor, Copilot, etc.) ---
-CLAUDE.md
-AGENTS.md
-**/CLAUDE.md
-**/AGENTS.md
-.claude/
-.cursorrules
-.cursor/
-.github/copilot-instructions.md
-
 # -- Paper ---------------------------------------------------------------
-**/paper
+/paper/*
+!/paper/figures/
