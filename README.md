@@ -4,7 +4,7 @@ This repository provides PyTorch and PennyLane implementations for imbalanced bl
 
 The code accompanies the article **Hybrid quantum learning for imbalanced blood-cell classification: domain adaptation and classifier design**, by Gabriele D'Angeli, Cyrill Aebischer, Eryk Schiller, Gianluca Nicchiotti, Su Fong Chien, Jerome Extermann, and Enrico Pomarico.
 
-![Affine and hybrid classification pipelines](paper/figures/pipeline.png)
+![Affine and hybrid classification pipelines](paper/figures/Fig1.png)
 
 ## Results
 
