@@ -4,6 +4,8 @@ This repository provides PyTorch and PennyLane implementations for imbalanced bl
 
 The code accompanies the article **Hybrid quantum learning for imbalanced blood-cell classification: domain adaptation and classifier design**, by Gabriele D'Angeli, Cyrill Aebischer, Eryk Schiller, Gianluca Nicchiotti, Su Fong Chien, Jerome Extermann, and Enrico Pomarico.
 
+The list of 81 removed MicroscopyRGB duplicates, the MLL23-adapted ResNet34 backbone weights, validation metadata and loading instructions are available on [Zenodo (DOI: 10.5281/zenodo.24141386)](https://doi.org/10.5281/zenodo.24141386).
+
 ![Affine and hybrid classification pipelines](paper/figures/Fig1.png)
 
 ## Results
